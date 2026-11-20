@@ -1,11 +1,11 @@
 # Release validation
 
-## v1.2.0
+## v1.2.1
 
 Go 1.27.3 on Linux amd64. The signed package passed startup, health and zstd self-test with the SDK host emulator configured for Sub2API 0.2.23. Its publisher public key matches v1.1.0.
 
 - Go tests and vet passed. The UI contract suite passed 10 checks.
-- Verified byte-local image edits, history replay and recovery after process restart with test KV, 415 replay, image failure passthrough, threshold equality and fit without cropping.
+- Verified byte-local image edits, history replay and recovery after process restart with test KV and a busy encoder, 415 replay, image failure passthrough, threshold equality and fit without cropping.
 - Verified SHA-256 after zstd decoding for 512 MiB under its configured limit and 513 MiB with the unlimited setting.
 
 Synthetic screenshot probes compared final zstd payload bytes with the image stage disabled and enabled.

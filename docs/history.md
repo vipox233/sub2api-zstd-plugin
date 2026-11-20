@@ -1,5 +1,9 @@
 # History
 
+## 1.2.1 - 2026-11-20
+
+- Wait for the bounded encoder when restoring a recorded JPEG after eviction or restart. Discard the image edits together if a recorded representation cannot be recovered.
+
 ## 1.2.0 - 2026-11-20
 
 - Added bounded PNG-to-JPEG optimization before the existing zstd HTTP transport.

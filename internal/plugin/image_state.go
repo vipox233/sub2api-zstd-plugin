@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -301,14 +302,13 @@ func (o *imageOptimizer) optimize(ctx context.Context, raw *spool, c Config, h h
 	slot := &o.slots[index]
 	slot.Lock()
 	defer slot.Unlock()
-	if work.Err() != nil {
-		o.stats.skip("timeout")
+	if ctx.Err() != nil {
 		return nil
 	}
 	kv := o.storage()
 	key := strconv.Itoa(index)
 	if slot.value == nil || slot.value.Expires <= time.Now().Unix() {
-		state, ok := loadImageSession(work, kv, key)
+		state, ok := loadImageSession(ctx, kv, key)
 		if !ok {
 			o.stats.skip("state_unavailable")
 			return nil
@@ -331,8 +331,17 @@ func (o *imageOptimizer) optimize(ctx context.Context, raw *spool, c Config, h h
 	}
 	// Keep an immutable baseline for the already visible history. New images
 	// can be adopted only on the first turn or after a verified prefix.
-	edits, newJPEGs := o.applyParts(work, state, raw, c, request.items, known)
+	candidate := *state
+	candidate.Decisions = maps.Clone(state.Decisions)
+	edits, newJPEGs, recovered := o.applyParts(ctx, work, &candidate, raw, c, request.items, known)
 	state.rememberPrefix(hashes)
+	if !recovered {
+		// The submitted history may be impossible to reconstruct after a
+		// codec change or I/O error. Do not mix representations or record
+		// new JPEG decisions for a body that will be forwarded as-is.
+		return nil
+	}
+	state.Decisions = candidate.Decisions
 	now := time.Now()
 	refresh := state.Expires <= now.Add(imageSessionTTL-time.Hour).Unix()
 	if refresh {
@@ -377,7 +386,7 @@ func keepRecordedEdits(edits []proposedImageEdit, keys map[string]struct{}) []pr
 	return kept
 }
 
-func (o *imageOptimizer) applyParts(ctx context.Context, state *imageSession, raw *spool, c Config, items []imageInput, known int) ([]proposedImageEdit, []string) {
+func (o *imageOptimizer) applyParts(ctx, freshWork context.Context, state *imageSession, raw *spool, c Config, items []imageInput, known int) ([]proposedImageEdit, []string, bool) {
 	var edits []proposedImageEdit
 	var newJPEGs []string
 	newCold := 0
@@ -436,7 +445,11 @@ func (o *imageOptimizer) applyParts(ctx context.Context, state *imageSession, ra
 					}
 					newCold++
 				}
-				jpg = o.coldEncode(ctx, cacheKey, input, limit)
+				if seen {
+					jpg = o.coldEncode(ctx, cacheKey, input, limit, true)
+				} else {
+					jpg = o.coldEncode(freshWork, cacheKey, input, limit, false)
+				}
 			}
 			if jpg == nil || jpg.bytes > limit {
 				if jpg != nil {
@@ -444,6 +457,7 @@ func (o *imageOptimizer) applyParts(ctx context.Context, state *imageSession, ra
 				}
 				if seen {
 					o.stats.prefixFallback.Add(1)
+					return nil, nil, false
 				}
 				continue
 			}
@@ -451,6 +465,7 @@ func (o *imageOptimizer) applyParts(ctx context.Context, state *imageSession, ra
 				o.stats.skip("format_or_limit")
 				if seen {
 					o.stats.prefixFallback.Add(1)
+					return nil, nil, false
 				}
 				continue
 			}
@@ -465,17 +480,28 @@ func (o *imageOptimizer) applyParts(ctx context.Context, state *imageSession, ra
 			})
 		}
 	}
-	return edits, newJPEGs
+	return edits, newJPEGs, true
 }
 
-func (o *imageOptimizer) coldEncode(ctx context.Context, key imageCacheKey, input pngSource, limit int) *cachedImage {
-	select {
-	case o.cold <- struct{}{}:
-		defer func() { <-o.cold }()
-	default:
-		o.stats.skip("busy")
-		return nil
+func (o *imageOptimizer) coldEncode(ctx context.Context, key imageCacheKey, input pngSource, limit int, restore bool) *cachedImage {
+	if restore {
+		// An already-sent image must survive eviction and a busy encoder.
+		// The size/pixel guard still applies. Wait for one bounded worker
+		// and honor the caller's cancellation instead of the new-image timer.
+		select {
+		case o.cold <- struct{}{}:
+		case <-ctx.Done():
+			return nil
+		}
+	} else {
+		select {
+		case o.cold <- struct{}{}:
+		default:
+			o.stats.skip("busy")
+			return nil
+		}
 	}
+	defer func() { <-o.cold }()
 	if ctx.Err() != nil {
 		o.stats.skip("timeout")
 		return nil
@@ -484,12 +510,16 @@ func (o *imageOptimizer) coldEncode(ctx context.Context, key imageCacheKey, inpu
 		o.stats.skip("no_gain")
 		return nil
 	}
-	budget := imageCodecBudget
-	if input.pixels > 4_000_000 {
-		budget = imageLargeCodecBudget
+	work := ctx
+	if !restore {
+		budget := imageCodecBudget
+		if input.pixels > 4_000_000 {
+			budget = imageLargeCodecBudget
+		}
+		var cancel context.CancelFunc
+		work, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
 	}
-	work, cancel := context.WithTimeout(ctx, budget)
-	defer cancel()
 	data, err := input.decode(work)
 	if err != nil {
 		o.stats.skip(imageCodecReason(work))

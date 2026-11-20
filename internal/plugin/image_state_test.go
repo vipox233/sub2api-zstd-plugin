@@ -42,6 +42,11 @@ func TestImageDecisionRestoresExactURLAfterRestart(t *testing.T) {
 	}
 	after := imageTestPlugin(t, map[string]any{"image_jpeg_quality": 65, "image_max_long_edge": 640})
 	after.images.kv = state
+	// Simulate a restart with an empty cache and a slot occupied by an
+	// unrelated encode. The recorded image must wait instead of reverting.
+	after.images.cold <- struct{}{}
+	release := time.AfterFunc(180*time.Millisecond, func() { <-after.images.cold })
+	defer release.Stop()
 	restored := imageTestUnpack(t, imageTestSend(t, after, body), "zstd")
 	if !bytes.Equal(selected, restored) {
 		t.Fatal("cold restart or new config changed the recorded representation")
