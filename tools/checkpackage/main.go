@@ -64,6 +64,7 @@ func run(args []string) (report, error) {
 	flags.SetOutput(io.Discard)
 	packagePath := flags.String("package", "", "signed .s2plugin package path")
 	publicKeyPath := flags.String("public-key", "", "Base64 Ed25519 public-key file")
+	targetHost := flags.String("host-version", hostVersion, "Sub2API version for the manifest compatibility check")
 	verifyOnly := flags.Bool("verify-only", false, "verify package without extracting or starting its executable")
 	if err := flags.Parse(args); err != nil {
 		return result, err
@@ -86,7 +87,7 @@ func run(args []string) (report, error) {
 	opts := packager.VerifyOptions{
 		TrustedPublishers: map[string]string{trustedKeyID: publicKey},
 		AllowUnsigned:     false,
-		HostVersion:       hostVersion,
+		HostVersion:       *targetHost,
 		Platform:          platform,
 	}
 	verified, err := packager.Verify(*packagePath, opts)
@@ -102,7 +103,7 @@ func run(args []string) (report, error) {
 		return result, errors.New("package was not signed by the expected trusted publisher")
 	}
 	if verified.Compatibility == nil || !verified.Compatibility.Compatible {
-		return result, fmt.Errorf("package does not support Sub2API %s", hostVersion)
+		return result, fmt.Errorf("package does not support Sub2API %s", *targetHost)
 	}
 	if *verifyOnly {
 		result.RuntimeStartup = "skipped_verify_only"

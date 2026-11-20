@@ -18,11 +18,20 @@ type Config struct {
 	FallbackOn415                bool   `json:"fallback_on_415"`
 	ResponseHeaderTimeoutSeconds int64  `json:"response_header_timeout_seconds"`
 	ProxyMode                    string `json:"proxy_mode"`
+	ImageEnabled                 bool   `json:"image_enabled"`
+	ImageJPEGQuality             int    `json:"image_jpeg_quality"`
+	ImageMaxLongEdge             int    `json:"image_max_long_edge"`
+	ImageMinSavingsPercent       int    `json:"image_min_savings_percent"`
+	ImageMinSavingsBytes         int    `json:"image_min_savings_bytes"`
 }
 
 // DefaultConfig favors upstream bandwidth savings without full-body heap buffers.
 func DefaultConfig() Config {
-	return Config{true, 1024, 512 << 20, 2, true, 600, "account"}
+	return Config{
+		CompressionEnabled: true, MinBodyBytes: 1024, MaxBodyBytes: 512 << 20,
+		MaxInFlight: 2, FallbackOn415: true, ResponseHeaderTimeoutSeconds: 600, ProxyMode: "account",
+		ImageJPEGQuality: 92, ImageMinSavingsPercent: 25, ImageMinSavingsBytes: 256 << 10,
+	}
 }
 
 // DecodeConfig strictly parses a single JSON object and fills missing defaults.
@@ -69,6 +78,15 @@ func DecodeConfig(raw []byte) (Config, error) {
 	}
 	if c.ProxyMode != "account" && c.ProxyMode != "direct" {
 		return Config{}, errors.New("proxy_mode 只能为 account 或 direct")
+	}
+	if c.ImageJPEGQuality < 1 || c.ImageJPEGQuality > 100 {
+		return Config{}, errors.New("image_jpeg_quality 必须在 1–100 之间")
+	}
+	if c.ImageMaxLongEdge != 0 && (c.ImageMaxLongEdge < 256 || c.ImageMaxLongEdge > imageMaxSourceEdge) {
+		return Config{}, errors.New("image_max_long_edge 必须为 0 或 256–8192")
+	}
+	if c.ImageMinSavingsPercent < 0 || c.ImageMinSavingsPercent > 100 || c.ImageMinSavingsBytes < 0 || c.ImageMinSavingsBytes > imageMaxPNGBytes {
+		return Config{}, errors.New("图片节省阈值须在 0–100% 和 0–24 MiB 之间")
 	}
 	return c, nil
 }

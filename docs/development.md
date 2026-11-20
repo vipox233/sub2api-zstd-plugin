@@ -1,6 +1,6 @@
 # Development
 
-The module and vendor tree pin the dependencies from 1.0.0. Build with Go 1.27.3.
+Use Go 1.27.3. The repository pins dependencies in go.mod and go.sum. The default build uses the checked module versions or the local vendor tree when present. Run make vendor after a clean checkout before using the offline test commands below.
 
 ```sh
 GOFLAGS='-mod=vendor -p=1' go test ./... -count=1 -timeout=120s
@@ -36,3 +36,18 @@ The host can retain full request bodies independently; this plugin does not chan
 The level-3 encoder explicitly enables all-literal entropy compression, which keeps
 random-looking Base64 image data eligible for alphabet-entropy savings even when
 there are few dictionary matches. Incompressible data still uses no-gain bypass.
+
+## Image optimization
+
+The larger image-processing scope is independent of the zstd size limit. The scanner reads at most 64 MiB of raw request JSON in chunks and records string offsets. It keeps a 32 MiB, 128-entry JPEG LRU with a two-hour idle lifetime. The encoder allows one cold conversion at a time and uses a 550 ms cooperative deadline for images up to four megapixels and 1050 ms for larger images within the 12-megapixel cap. Total image work per request has a 1400 ms cooperative budget. Cache hits hash the Base64 stream without allocating the decoded PNG.
+
+Original-file size minus JPEG-file size must pass both the configured byte floor and the rounded-up percentage floor. Setting both to zero still requires strictly smaller output. The encoder stops writing when the maximum acceptable JPEG length is crossed.
+
+Session decisions live in up to 256 expiring slots. The slot is keyed by input history and the session header when available. A live collision falls back to original images. When provided by the host, the plugin KV stores only versioned metadata and SHA-256 digests for seven days. A restart may recover a recorded JPEG deterministically from the original source and verify its digest. An unrecoverable representation or a limit can cause a request to use its original image.
+
+Build and verify against the declared 0.2.23 compatibility range with:
+
+    make pack GO=/path/to/go PRIVATE_KEY=/private/outside/source/publisher.pem
+    go run -mod=vendor ./tools/checkpackage --host-version 0.2.23 --package dist/openai-upstream-zstd-1.2.0-linux-amd64.s2plugin --public-key dist/publisher-public-key.txt
+
+The check starts the signed executable with the SDK host emulator. Use a separate OAuth test account or isolated gateway to measure real cached tokens, OCR and time to first token.

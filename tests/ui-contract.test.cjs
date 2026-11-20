@@ -17,7 +17,12 @@ const MiB = 1024 * 1024;
 const defaults = {
   compression_enabled: true, min_body_bytes: 1024, max_body_bytes: 512 * MiB,
   max_in_flight: 2, fallback_on_415: true, response_header_timeout_seconds: 600,
-  proxy_mode: 'account'
+  proxy_mode: 'account',
+  image_enabled: false,
+  image_jpeg_quality: 92,
+  image_max_long_edge: 0,
+  image_min_savings_percent: 25,
+  image_min_savings_bytes: 262144
 };
 const snapshot = {
   version: '1.1.0', algorithm: 'zstd', level: 3, config: defaults,

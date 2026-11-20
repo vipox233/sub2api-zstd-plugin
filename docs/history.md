@@ -1,5 +1,11 @@
 # History
 
+## 1.2.0 - 2026-11-20
+
+- Added bounded PNG-to-JPEG optimization before the existing zstd HTTP transport.
+- Kept existing zstd configuration defaults and the publisher identity. Image optimization is opt-in.
+- Added byte-exact JSON patching, persistent decision metadata when available, and image and wire-size stats.
+
 ## 1.1.0 - 2026-11-04
 
 Requested: remove the restrictive 64 MiB request/aggregate cap for a bandwidth-limited server.

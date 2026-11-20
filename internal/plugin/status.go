@@ -29,6 +29,7 @@ func (p *Plugin) statusJSON() []byte {
 		"started_at": p.started.UTC().Format(time.RFC3339), "cooldown_until": cooldown,
 		"request_body_storage": "memory up to 1 MiB per copy, then anonymous temporary files",
 		"size_limit_unlimited": c.MaxBodyBytes == 0,
+		"images":               p.images.status(),
 		"stats": map[string]any{
 			"total_requests": p.stats.total.Load(), "compressed_requests": p.stats.compressed.Load(),
 			"original_bytes": original, "wire_bytes": wire, "saved_bytes": original - wire, "saving_percent": percent,

@@ -15,9 +15,9 @@
       <div>
         <p class="eyebrow">SUB2API TRANSPORT</p>
         <h1>OpenAI 上游请求压缩</h1>
-        <p class="subtitle">在服务器发送请求前压缩 JSON，减少上传到 Codex 上游的数据量。</p>
+        <p class="subtitle">优化内联截图和请求体，减少上传到 Codex 上游的数据量。</p>
       </div>
-      <span class="codec">v1.1.0 · zstd Level 3</span>
+      <span class="codec">v1.2.0 · JPEG / zstd</span>
     </header>
 
     <div id="notice" class="notice" role="status" aria-live="polite">正在读取已保存配置…</div>
@@ -29,7 +29,7 @@
           <div class="toggle-row">
             <div>
               <h2 id="compression-title">启用请求压缩</h2>
-              <p class="hint">关闭后仍由插件转发请求，发送未压缩的数据。</p>
+              <p class="hint">启用 zstd 压缩出站请求体。图片优化另有开关。</p>
             </div>
             <label class="switch" for="compression_enabled">
               <input id="compression_enabled" type="checkbox" checked>
@@ -41,7 +41,7 @@
             <span class="scope-label">生效范围</span>
             <span>OpenAI OAuth → <code>chatgpt.com/backend-api/codex/responses</code></span>
           </div>
-          <p class="hint scope-note">只处理上述官方 HTTPS 端点（含末尾斜杠）。其他 HTTP 路径原样转发；不支持 API Key 账号和 WebSocket 帧。不会删减上下文或减少 token 用量。</p>
+          <p class="hint scope-note">只处理上述官方 HTTPS 端点（含末尾斜杠）。其他 HTTP 路径原样转发；不支持 API Key 账号和 WebSocket 帧。原尺寸换图保留像素尺寸和 detail。</p>
         </section>
 
         <section class="panel" aria-labelledby="resource-title">
@@ -89,6 +89,34 @@
           </div>
         </section>
 
+        <section class="panel" aria-labelledby="image-title">
+          <label class="checkbox-row" for="image_enabled">
+            <input id="image_enabled" type="checkbox">
+            <span><strong id="image-title">启用图片优化</strong><small>大 PNG 截图先转为 JPEG，再压缩请求。开启后从新对话开始验证。</small></span>
+          </label>
+          <div class="field-grid">
+            <label class="field" for="image_jpeg_quality">
+              <span>JPEG 画质</span>
+              <input id="image_jpeg_quality" type="number" value="92" min="1" max="100" step="1" required>
+              <small>截图建议 92，优先保留细字。</small>
+            </label>
+            <label class="field" for="image_max_long_edge">
+              <span>长边上限 <span class="unit">px</span></span>
+              <input id="image_max_long_edge" type="number" value="0" min="0" max="8192" step="1" required>
+              <small>0 保留尺寸。可填 2560 等比缩小普通截图。</small>
+            </label>
+            <label class="field" for="image_min_savings_percent">
+              <span>至少节省 <span class="unit">%</span></span>
+              <input id="image_min_savings_percent" type="number" value="25" min="0" max="100" step="1" required>
+            </label>
+            <label class="field" for="image_min_savings_kib">
+              <span>至少节省 <span class="unit">KiB</span></span>
+              <input id="image_min_savings_kib" type="number" value="256" min="0" max="24576" step="any" required>
+            </label>
+          </div>
+          <p class="hint">两道门槛均按图片文件字节计算，达到两道门槛才替换。透明 PNG、电脑操作截图和不符合条件的图片使用原图。</p>
+        </section>
+
       </fieldset>
         <div class="actions">
           <div class="action-buttons">
@@ -113,6 +141,19 @@
       <p id="stats-time" class="muted">尚未读取</p>
       <p id="test-message" class="hint">本地自检验证压缩和解压是否一致；不会发起 OpenAI 请求，也不代表已通过上游实测。</p>
       <details id="status-details" hidden><summary>查看详细统计</summary><pre id="status-json"></pre></details>
+    </section>
+
+    <section class="panel stats-panel" aria-labelledby="image-stats-title">
+      <h2 id="image-stats-title">图片优化统计</h2>
+      <div class="stats-grid">
+        <div class="stat"><span>原始请求体</span><strong id="stat-image-before">—</strong></div>
+        <div class="stat"><span>换图后</span><strong id="stat-image-after">—</strong></div>
+        <div class="stat"><span>预计发送体积</span><strong id="stat-image-wire">—</strong></div>
+        <div class="stat"><span>图片缓存命中率</span><strong id="stat-image-hit">—</strong></div>
+        <div class="stat"><span>替换次数</span><strong id="stat-image-replaced">—</strong></div>
+        <div class="stat"><span>累计处理耗时</span><strong id="stat-image-time">—</strong></div>
+      </div>
+      <p class="hint">体积仅计入发生换图的请求。详细统计包含跳过原因、缓存容量和历史图片回退次数。</p>
     </section>
 
     <footer>

@@ -1,4 +1,24 @@
-# Release validation: 1.1.0
+# Release validation
+
+## v1.2.0
+
+Go 1.27.3 on Linux amd64. The signed package passed startup, health and zstd self-test with the SDK host emulator configured for Sub2API 0.2.23. Its publisher public key matches v1.1.0.
+
+- Go tests and vet passed. The UI contract suite passed 10 checks.
+- Verified byte-local image edits, history replay and recovery after process restart with test KV, 415 replay, image failure passthrough, threshold equality and fit without cropping.
+- Verified SHA-256 after zstd decoding for 512 MiB under its configured limit and 513 MiB with the unlimited setting.
+
+Synthetic screenshot probes compared final zstd payload bytes with the image stage disabled and enabled.
+
+| Sample | zstd alone | JPEG and zstd | Reduction |
+|---|---:|---:|---:|
+| 2560 × 1440 panel | 5,945,210 B | 1,215,267 B | 79.6% |
+| 3840 × 2160 panel | 13,325,230 B | 2,719,563 B | 79.6% |
+| 3840 × 2160 color | 13,280,901 B | 2,184,330 B | 83.6% |
+
+Reproduce with `SUB2API_IMAGE_BENCH=1 go test -mod=vendor ./internal/plugin -run '^TestImageBandwidthProbe$' -count=1 -v`. A real OAuth test is needed to measure screenshot recognition, actual time to first token and upstream cache usage.
+
+## v1.1.0
 
 Built on Linux amd64 using the pinned Go 1.27.3 toolchain and vendored dependencies.
 

@@ -44,6 +44,7 @@ type Plugin struct {
 	waiting       atomic.Int64
 	cooldownUntil atomic.Int64
 	stats         counters
+	images        *imageOptimizer
 	encoders      chan *zstd.Encoder
 	// Tests substitute the wire transport, without weakening production routing.
 	roundTripOverride func(*http.Request, string) (*http.Response, error)
@@ -53,6 +54,7 @@ type Plugin struct {
 func New(info sdk.Info) *Plugin {
 	p := &Plugin{info: info, started: time.Now(), encoders: make(chan *zstd.Encoder, 4), notify: make(chan struct{})}
 	p.state = newState(DefaultConfig())
+	p.images = newImageOptimizer()
 	return p
 }
 
@@ -293,43 +295,61 @@ func (p *Plugin) RoundTrip(req *http.Request, meta *sdk.RequestMeta) (*http.Resp
 			_ = r.Body.Close()
 		}
 	}()
-	if !c.CompressionEnabled {
+	target := compressionTarget(r, meta)
+	encoded := strings.TrimSpace(strings.Join(r.Header.Values("Content-Encoding"), ",")) != ""
+	hasBody := r.Body != nil && r.Body != http.NoBody
+	zstdEligible := false
+	imageEligible := c.ImageEnabled && target && !encoded && hasBody && r.ContentLength <= maxImageBodyBytes
+	switch {
+	case !c.CompressionEnabled:
 		p.stats.disabled.Add(1)
-	} else if !compressionTarget(r, meta) {
+	case !target:
 		p.stats.target.Add(1)
-	} else if strings.TrimSpace(r.Header.Get("Content-Encoding")) != "" {
+	case encoded:
 		p.stats.encoding.Add(1)
-	} else if p.cooldownUntil.Load() > time.Now().Unix() {
+	case p.cooldownUntil.Load() > time.Now().Unix():
 		p.stats.cooldown.Add(1)
-	} else if r.Body == nil || r.Body == http.NoBody || (r.ContentLength > 0 && r.ContentLength < c.MinBodyBytes) {
+	case !hasBody || (r.ContentLength > 0 && r.ContentLength < c.MinBodyBytes):
 		p.stats.small.Add(1)
-	} else if c.MaxBodyBytes > 0 && r.ContentLength > c.MaxBodyBytes {
+	case c.MaxBodyBytes > 0 && r.ContentLength > c.MaxBodyBytes:
 		p.stats.large.Add(1)
-	} else {
+	default:
+		zstdEligible = true
+	}
+	if c.ImageEnabled && target && !encoded && r.ContentLength > maxImageBodyBytes {
+		p.images.stats.skip("request_limit")
+	}
+	if imageEligible || zstdEligible {
 		unreserve, reserveErr := p.reserve(r.Context())
 		if reserveErr != nil {
 			return nil, transport.NotSent("CANCELED", "Compression queue canceled or plugin stopped; no upload sent")
 		}
 		lease = newBodyLease(func() { prepared.close(); unreserve() })
 		defer lease.done()
-		// A preceding request may have received 415 while this one was queued.
-		if p.cooldownUntil.Load() > time.Now().Unix() {
+		if zstdEligible && p.cooldownUntil.Load() > time.Now().Unix() {
 			p.stats.cooldown.Add(1)
-		} else {
+			zstdEligible = false
+		}
+		if imageEligible || zstdEligible {
 			src := r.Body
 			length := r.ContentLength
 			if length == 0 {
 				length = -1
 			}
 			started := time.Now()
-			prepared, err = p.prepareBody(r.Context(), src, length, c)
-			p.stats.compressionMicros.Add(time.Since(started).Microseconds())
+			prepared, err = p.prepareBody(r.Context(), src, length, c, zstdEligible, imageEligible, r.Header)
+			if zstdEligible {
+				p.stats.compressionMicros.Add(time.Since(started).Microseconds())
+			}
 			if err != nil {
 				p.stats.errors.Add(1)
 				return nil, transport.NotSent("COMPRESSION_PREPARE", "Request preparation failed (body read, length, cancellation, or temporary storage); no raw upload was sent")
 			}
 			if prepared.usedDisk {
 				p.stats.diskRequests.Add(1)
+			}
+			if imageEligible && prepared.raw.size > maxImageBodyBytes {
+				p.images.stats.skip("request_limit")
 			}
 			if prepared.overLimit {
 				p.stats.large.Add(1)
@@ -343,15 +363,26 @@ func (p *Plugin) RoundTrip(req *http.Request, meta *sdk.RequestMeta) (*http.Resp
 				r.Header.Set("Content-Encoding", "zstd")
 				compressed = true
 				p.stats.compressed.Add(1)
-				p.stats.original.Add(prepared.raw.size)
+				p.stats.original.Add(prepared.selectedSize())
 				p.stats.wire.Add(prepared.encoded.size)
 			} else {
-				setSpoolBody(r, &prepared.raw)
-				if prepared.raw.size < c.MinBodyBytes {
-					p.stats.small.Add(1)
-				} else {
-					p.stats.noGain.Add(1)
+				setSelectedBody(r, prepared)
+				if zstdEligible {
+					switch {
+					case prepared.raw.size < c.MinBodyBytes:
+						p.stats.small.Add(1)
+					case c.MaxBodyBytes > 0 && prepared.raw.size > c.MaxBodyBytes:
+						p.stats.large.Add(1)
+					default:
+						p.stats.noGain.Add(1)
+					}
 				}
+			}
+			if len(prepared.edits) != 0 {
+				p.images.stats.requests.Add(1)
+				p.images.stats.before.Add(prepared.raw.size)
+				p.images.stats.after.Add(prepared.selectedSize())
+				p.images.stats.wire.Add(r.ContentLength)
 			}
 		}
 	}
@@ -394,11 +425,14 @@ func (p *Plugin) RoundTrip(req *http.Request, meta *sdk.RequestMeta) (*http.Resp
 		// Stop any early-rejected upload before opening an independent replay cursor.
 		_ = r.Body.Close()
 		retry := r.Clone(r.Context())
-		setSpoolBody(retry, &prepared.raw)
+		setSelectedBody(retry, prepared)
 		retry.Header.Del("Content-Encoding")
 		retry.Body = lease.track(retry.Body)
 		p.stats.fallbacks.Add(1)
-		p.stats.wire.Add(prepared.raw.size)
+		p.stats.wire.Add(prepared.selectedSize())
+		if len(prepared.edits) != 0 {
+			p.images.stats.wire.Add(retry.ContentLength)
+		}
 		resp, err = send(retry)
 		if err != nil {
 			_ = retry.Body.Close()
@@ -424,6 +458,19 @@ func (p *Plugin) RoundTrip(req *http.Request, meta *sdk.RequestMeta) (*http.Resp
 	resp.Body = &releaseBody{ReadCloser: resp.Body, release: release}
 	released = true
 	return resp, nil
+}
+
+func setSelectedBody(req *http.Request, prepared *preparedBody) {
+	if len(prepared.edits) == 0 {
+		setSpoolBody(req, &prepared.raw)
+		return
+	}
+	req.Body = io.NopCloser(prepared.selectedReader())
+	req.ContentLength = prepared.selectedSize()
+	req.GetBody = nil
+	req.TransferEncoding = nil
+	req.Header.Del("Content-Length")
+	req.Header.Del("Transfer-Encoding")
 }
 
 func setSpoolBody(req *http.Request, body *spool) {
