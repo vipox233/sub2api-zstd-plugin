@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "cn.vipox.openai-upstream-zstd",
+  "name": "OpenAI 上游图片优化与 Zstd 压缩",
+  "version": "1.3.0",
+  "description": "在官方 Codex OAuth HTTP 出站请求中优化内联 JPEG 和 PNG，再使用 Zstd 压缩请求体。",
+  "author": "vipox (personal build)",
+  "requires": {
+    "sub2api": ">=0.2.19 <0.3.0",
+    "recommended_sub2api_version": "0.2.19",
+    "tested_sub2api_versions": [],
+    "plugin_protocol": 1,
+    "transport_api": 1,
+    "ui_bridge": 1
+  },
+  "capabilities": [
+    {
+      "id": "openai.oauth.outbound_transport.v1",
+      "platform": "openai",
+      "account_type": "oauth"
+    }
+  ],
+  "runtimes": {},
+  "ui": {
+    "entrypoint": "ui/index.html"
+  },
+  "files": {}
+}

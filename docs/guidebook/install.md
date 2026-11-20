@@ -1,0 +1,20 @@
+# 安装 OpenAI 上游图片优化与 Zstd 压缩
+
+## 升级
+
+1. 在 Sub2API 后台的插件管理上传 `openai-upstream-zstd-1.3.0-linux-amd64.s2plugin`。沿用插件 ID `cn.vipox.openai-upstream-zstd` 和发行方 `vipox-zstd-20261104`。
+2. 读取当前配置。图片开关、zstd、代理、请求体上限和超时沿用旧值。v1.2.x 的长边和双门槛设置迁移为 1080p 与 32 KiB，旧默认 Q92 迁移为 Q86，自订画质沿用。
+3. 开启图片优化并保存。新建 HTTP 对话，发送一张几 MiB 的 JPEG 或 PNG，再在同一会话续轮。观察图片统计和首字延迟。
+
+## 首次安装
+
+从构建产物 `trusted-publisher.yaml` 取出对应公钥，合并到宿主 `config.yaml` 的 `plugins.trusted_publishers`。宿主读取配置后即可上传并启用 Linux amd64 签名包。0.2.23 处于清单允许范围，启用时宿主可能要求接受未实测的宿主版本。
+
+## 日常使用
+
+- 普通图用 1080p Q86。小字截图可用 1440p Q92。原尺寸档保留宽高并尝试重编码。
+- 图片处理针对最终 Codex OAuth 的 HTTP 请求。zstd 对纯文本同样生效。5 Mbps 出口可保持 zstd 并发 2，最大压缩体默认 512 MiB，填 0 可解除该项上限。
+- 图片异常或超限时使用原图继续请求。临时目录需要可写空间。大请求会使用匿名文件准备出站包体。
+- 想暂停新功能时在配置页关闭图片优化，继续使用本版的 zstd。
+
+参见[本地验证和实测范围](../validation.md)。
