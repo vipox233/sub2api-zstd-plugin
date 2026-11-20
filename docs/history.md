@@ -1,0 +1,15 @@
+# History
+
+## 1.1.0 - 2026-11-04
+
+Requested: remove the restrictive 64 MiB request/aggregate cap for a bandwidth-limited server.
+Implemented: 512 MiB default; 0 unlimited; custom positive sizes; no aggregate multiplication cap;
+bounded-chunk compression and anonymous temporary spools; wait rather than bypass compression when busy.
+Old saved configuration remains unchanged until the administrator saves a new size.
+Same plugin ID, new release version and publisher key ID vipox-zstd-20261104.
+Built and tested in an isolated server workspace. No production installation or authenticated OpenAI requests.
+Tests and exact artifact hashes are recorded in validation.md and the accompanying release files.
+
+## 1.0.0 - 2026-11-03
+
+Initial OAuth outbound transport release, with a 16 MiB default and 64 MiB cap.

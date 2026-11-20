@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "cn.vipox.openai-upstream-zstd",
+  "name": "OpenAI 上游 Zstd 压缩",
+  "version": "1.1.0",
+  "description": "压缩发往官方 Codex Backend Responses 的 OpenAI OAuth 请求；保留账号代理和流式响应。",
+  "author": "vipox (personal build)",
+  "requires": {
+    "sub2api": ">=0.2.19 <0.3.0",
+    "recommended_sub2api_version": "0.2.19",
+    "tested_sub2api_versions": [],
+    "plugin_protocol": 1,
+    "transport_api": 1,
+    "ui_bridge": 1
+  },
+  "capabilities": [
+    {
+      "id": "openai.oauth.outbound_transport.v1",
+      "platform": "openai",
+      "account_type": "oauth"
+    }
+  ],
+  "runtimes": {},
+  "ui": {
+    "entrypoint": "ui/index.html"
+  },
+  "files": {}
+}

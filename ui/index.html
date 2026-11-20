@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>OpenAI 上游请求压缩</title>
+  <link rel="stylesheet" href="assets/app.css">
+  <script src="assets/bridge-v1.js" defer></script>
+  <script src="assets/app.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">SUB2API TRANSPORT</p>
+        <h1>OpenAI 上游请求压缩</h1>
+        <p class="subtitle">在服务器发送请求前压缩 JSON，减少上传到 Codex 上游的数据量。</p>
+      </div>
+      <span class="codec">v1.1.0 · zstd Level 3</span>
+    </header>
+
+    <div id="notice" class="notice" role="status" aria-live="polite">正在读取已保存配置…</div>
+
+    <form id="config-form" novalidate>
+      <fieldset id="config-fields" disabled>
+        <legend class="sr-only">压缩设置</legend>
+        <section class="panel primary-panel" aria-labelledby="compression-title">
+          <div class="toggle-row">
+            <div>
+              <h2 id="compression-title">启用请求压缩</h2>
+              <p class="hint">关闭后仍由插件转发请求，发送未压缩的数据。</p>
+            </div>
+            <label class="switch" for="compression_enabled">
+              <input id="compression_enabled" type="checkbox" checked>
+              <span class="switch-track" aria-hidden="true"></span>
+              <span class="sr-only">启用请求压缩</span>
+            </label>
+          </div>
+          <div class="scope">
+            <span class="scope-label">生效范围</span>
+            <span>OpenAI OAuth → <code>chatgpt.com/backend-api/codex/responses</code></span>
+          </div>
+          <p class="hint scope-note">只处理上述官方 HTTPS 端点（含末尾斜杠）。其他 HTTP 路径原样转发；不支持 API Key 账号和 WebSocket 帧。不会删减上下文或减少 token 用量。</p>
+        </section>
+
+        <section class="panel" aria-labelledby="resource-title">
+          <h2 id="resource-title">资源与兼容性</h2>
+          <p class="section-description">优先节省出站带宽：默认 512 MiB，填 0 不设插件大小上限。</p>
+          <div class="field-grid">
+            <label class="field" for="min_body_bytes">
+              <span>最小请求体 <span class="unit">字节</span></span>
+              <input id="min_body_bytes" type="number" value="1024" min="1" max="1048576" step="1" inputmode="numeric" required>
+              <small>小于此值直接发送，默认 1 KiB。</small>
+            </label>
+            <label class="field" for="max_body_mib">
+              <span>最大压缩请求体 <span class="unit">MiB</span></span>
+              <input id="max_body_mib" type="number" value="512" min="0" step="any" inputmode="decimal" required>
+              <small>可填 512、1024 或自定义数值；0 = 不限。仅超过非零上限时原样转发。</small>
+            </label>
+            <label class="field" for="max_in_flight">
+              <span>同时压缩的请求上限</span>
+              <select id="max_in_flight">
+                <option value="1">1</option>
+                <option value="2" selected>2（默认）</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+              </select>
+              <small>达到上限时排队等待，不因并发满而发送原文；客户端取消时终止等待。</small>
+            </label>
+            <label class="field" for="response_header_timeout_seconds">
+              <span>等待上游响应头 <span class="unit">秒</span></span>
+              <input id="response_header_timeout_seconds" type="number" value="600" min="30" max="1800" step="1" inputmode="numeric" required>
+              <small>收到响应头后，流式输出继续按需转发。</small>
+            </label>
+          </div>
+          <p id="memory-budget" class="hint budget">大请求分块压缩，超过 1 MiB 的数据副本使用匿名临时文件，不按上限预分配内存。</p>
+          <label class="checkbox-row" for="fallback_on_415">
+            <input id="fallback_on_415" type="checkbox" checked>
+            <span><strong>上游返回 HTTP 415 时，回退一次未压缩请求</strong><small>只处理明确的媒体类型拒绝，不对网络错误或普通 400 自动重发。</small></span>
+          </label>
+          <div class="field proxy-field">
+            <label for="proxy_mode">上游代理</label>
+            <select id="proxy_mode">
+              <option value="account">跟随账号代理（默认）</option>
+              <option value="direct">直接连接上游</option>
+            </select>
+            <small id="proxy-help">使用 Sub2API 传入的账号代理；未配置代理的账号直接连接。</small>
+          </div>
+        </section>
+
+      </fieldset>
+        <div class="actions">
+          <div class="action-buttons">
+            <button id="reload" type="button" class="button secondary">读取配置</button>
+            <button id="save" type="submit" class="button primary" disabled>保存</button>
+            <button id="test" type="button" class="button secondary" disabled>本地自检</button>
+          </div>
+          <p id="save-state" class="save-state">配置已同步</p>
+        </div>
+    </form>
+
+    <section class="panel stats-panel" aria-labelledby="stats-title">
+      <div class="section-header"><h2 id="stats-title">压缩请求体估算</h2><button id="refresh" type="button" class="button secondary compact">刷新统计</button></div>
+      <p class="section-description">只统计当前进程尝试压缩的请求，重启后清零。刷新不修改配置，也不访问上游。</p>
+      <div class="stats-grid">
+        <div class="stat"><span>压缩次数</span><strong id="stat-compressed">—</strong></div>
+        <div class="stat"><span>对应原始体积</span><strong id="stat-before">—</strong></div>
+        <div class="stat"><span>预计发送体积</span><strong id="stat-after">—</strong></div>
+        <div class="stat"><span>体积减少比例</span><strong id="stat-saved">—</strong></div>
+      </div>
+      <p class="hint">预计发送体积 = 准备发送的压缩请求体 + HTTP 415 回退重试的原文。它不是系统实测流量，不含 HTTP/TLS/IP 开销；失败尝试可能未完整发送。回退后减少比例可能为负数。</p>
+      <p id="stats-time" class="muted">尚未读取</p>
+      <p id="test-message" class="hint">本地自检验证压缩和解压是否一致；不会发起 OpenAI 请求，也不代表已通过上游实测。</p>
+      <details id="status-details" hidden><summary>查看详细统计</summary><pre id="status-json"></pre></details>
+    </section>
+
+    <footer>
+      <p>在宿主「插件管理」中启用并设置灰度后才会接管流量。同一时间只能启用一个 OAuth 传输插件；停用本插件可恢复 Sub2API 内置转发。</p>
+      <p>无需填写 API Key 或 OAuth Token。保存和本地自检可能触发宿主的管理员验证。</p>
+    </footer>
+  </main>
+</body>
+</html>
