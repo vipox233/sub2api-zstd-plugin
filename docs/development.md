@@ -48,6 +48,6 @@ Session decisions live in up to 256 expiring slots. The slot is keyed by input h
 Build and verify against the declared 0.2.23 compatibility range with:
 
     make pack GO=/path/to/go PRIVATE_KEY=/private/outside/source/publisher.pem
-    go run -mod=vendor ./tools/checkpackage --host-version 0.2.23 --package dist/openai-upstream-zstd-1.2.1-linux-amd64.s2plugin --public-key dist/publisher-public-key.txt
+    go run -mod=vendor ./tools/checkpackage --host-version 0.2.23 --package dist/openai-upstream-zstd-1.2.2-linux-amd64.s2plugin --public-key dist/publisher-public-key.txt
 
 The check starts the signed executable with the SDK host emulator. Use a separate OAuth test account or isolated gateway to measure real cached tokens, OCR and time to first token.

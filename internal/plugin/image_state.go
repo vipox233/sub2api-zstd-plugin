@@ -59,9 +59,23 @@ type imageSession struct {
 }
 
 type imageSessionSlot struct {
-	sync.Mutex
+	gate  chan struct{}
 	value *imageSession
 }
+
+func (s *imageSessionSlot) acquire(ctx context.Context) bool {
+	select {
+	case s.gate <- struct{}{}:
+		if ctx.Err() == nil {
+			return true
+		}
+		s.release()
+	case <-ctx.Done():
+	}
+	return false
+}
+
+func (s *imageSessionSlot) release() { <-s.gate }
 
 type imageKV interface {
 	Get(context.Context, string, string) ([]byte, bool, error)
@@ -97,7 +111,11 @@ type imageOptimizer struct {
 }
 
 func newImageOptimizer() *imageOptimizer {
-	return &imageOptimizer{cold: make(chan struct{}, 1), cache: make(map[imageCacheKey]*list.Element)}
+	o := &imageOptimizer{cold: make(chan struct{}, 1), cache: make(map[imageCacheKey]*list.Element)}
+	for i := range o.slots {
+		o.slots[i].gate = make(chan struct{}, 1)
+	}
+	return o
 }
 
 func (p *Plugin) SetHostServices(client *hostsvc.Client) {
@@ -300,11 +318,10 @@ func (o *imageOptimizer) optimize(ctx context.Context, raw *spool, c Config, h h
 	}
 	index := int(anchor[0])
 	slot := &o.slots[index]
-	slot.Lock()
-	defer slot.Unlock()
-	if ctx.Err() != nil {
+	if !slot.acquire(ctx) {
 		return nil
 	}
+	defer slot.release()
 	kv := o.storage()
 	key := strconv.Itoa(index)
 	if slot.value == nil || slot.value.Expires <= time.Now().Unix() {

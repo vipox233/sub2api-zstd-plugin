@@ -4,7 +4,7 @@ Sub2API 的 OpenAI OAuth HTTP 出站插件。保留旧插件 ID 和签名发行�
 
 ## 安装与升级
 
-1. 在 Sub2API 插件管理上传签名的 `openai-upstream-zstd-1.2.1-linux-amd64.s2plugin`。首次安装时按[安装说明](docs/guidebook/install.md)登记公钥。
+1. 在 Sub2API 插件管理上传签名的 `openai-upstream-zstd-1.2.2-linux-amd64.s2plugin`。首次安装时按[安装说明](docs/guidebook/install.md)登记公钥。
 2. 打开配置页读取旧配置。图片优化默认关闭，原有 zstd、大小上限与代理设置继续使用已保存值。
 3. 开启图片优化，从一个新 HTTP 对话发送大 PNG 截图，再用同一个对话验证续轮。将关闭图片优化作为回退手段。
 

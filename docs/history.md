@@ -1,5 +1,9 @@
 # History
 
+## 1.2.2 - 2026-11-20
+
+- Cancel image session-slot waits when their request ends and release the forwarding reservation promptly.
+
 ## 1.2.1 - 2026-11-20
 
 - Wait for the bounded encoder when restoring a recorded JPEG after eviction or restart. Discard the image edits together if a recorded representation cannot be recovered.

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"io"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -25,13 +27,31 @@ func (ledger testImageLedger) Set(_ context.Context, _, key string, value []byte
 }
 
 func TestImageDecisionRestoresExactURLAfterRestart(t *testing.T) {
-	_, source := imageTestSource(t)
+
+	const width, height = 640, 320
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := range height {
+		for x := range width {
+			shade := uint8(38)
+			if x >= width/2 {
+				shade = 218
+			}
+			i := img.PixOffset(x, y)
+			img.Pix[i], img.Pix[i+1], img.Pix[i+2], img.Pix[i+3] = shade, shade, shade, 255
+		}
+	}
+	var imageBytes bytes.Buffer
+	pngEncoder := png.Encoder{CompressionLevel: png.NoCompression}
+	if err := pngEncoder.Encode(&imageBytes, img); err != nil {
+		t.Fatal(err)
+	}
+	source := imageTestPNG + base64.StdEncoding.EncodeToString(imageBytes.Bytes())
 	body := imageTestTurn(imageTestUser(source, "auto"))
 	state := testImageLedger{}
 	before := imageTestPlugin(t, nil)
 	before.images.kv = state
 	selected := imageTestUnpack(t, imageTestSend(t, before, body), "zstd")
-	imageTestReadJPEG(t, selected, imageTestWidth, imageTestHeight)
+	imageTestReadJPEG(t, selected, width, height)
 	if len(state) != 1 {
 		t.Fatalf("expected one stored decision, got %d", len(state))
 	}
@@ -50,6 +70,62 @@ func TestImageDecisionRestoresExactURLAfterRestart(t *testing.T) {
 	restored := imageTestUnpack(t, imageTestSend(t, after, body), "zstd")
 	if !bytes.Equal(selected, restored) {
 		t.Fatal("cold restart or new config changed the recorded representation")
+	}
+}
+
+func TestImageSessionWaitCancellationReleasesReservation(t *testing.T) {
+	p := imageTestPlugin(t, nil)
+	body := imageTestTurn("{\"role\":\"user\",\"content\":\"hold the image session gate\"}")
+	req := imageTestRequest(t, body)
+	var raw spool
+	if _, err := raw.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	defer raw.close()
+	input, err := scanImageRequest(context.Background(), &raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor, _, _, err := prefixHashes(context.Background(), &raw, input.items, req.Header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot := &p.images.slots[anchor[0]]
+	if !slot.acquire(context.Background()) {
+		t.Fatal("could not reserve test slot")
+	}
+	defer slot.release()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.roundTripOverride = func(_ *http.Request, _ string) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(nil))}, nil
+	}
+	started := make(chan error, 1)
+	go func() {
+		response, err := p.RoundTrip(req.WithContext(ctx), oauthMeta(body))
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		started <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for p.inFlight.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("request never reached the preparation reservation")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-started:
+		if err == nil {
+			t.Fatal("canceled request was sent")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("request remained blocked while its session slot was held")
+	}
+	if p.inFlight.Load() != 0 {
+		t.Fatal("canceled image wait retained its request reservation")
 	}
 }
 
