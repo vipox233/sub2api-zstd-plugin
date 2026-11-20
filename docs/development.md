@@ -39,15 +39,15 @@ there are few dictionary matches. Incompressible data still uses no-gain bypass.
 
 ## Image optimization
 
-The larger image-processing scope is independent of the zstd size limit. The scanner reads at most 64 MiB of raw request JSON in chunks and records string offsets. It keeps a 32 MiB, 128-entry JPEG LRU with a two-hour idle lifetime. The encoder allows one cold conversion at a time and uses a 550 ms cooperative deadline for images up to four megapixels and 1050 ms for larger images within the 12-megapixel cap. New-image work has a 1400 ms cooperative budget. Restoring a recorded JPEG has priority over fresh encodes, waits for the same single worker and follows the request context. Cache hits hash the Base64 stream without allocating the decoded PNG.
+Image processing is independent of the zstd size limit. The scanner reads at most 64 MiB of raw request JSON in chunks and records string offsets. Image edits use at most 16 MiB of replacement URLs per request. The 32 MiB, 128-entry JPEG cache has a two-hour idle lifetime. One worker handles cold conversions, with at most two fresh conversions per request. Scanning and fresh work share a five-second cooperative budget. Restoring a recorded JPEG waits for the same worker and follows the request context. Cache hits hash the Base64 stream without allocating the decoded file.
 
-Original-file size minus JPEG-file size must pass both the configured byte floor and the rounded-up percentage floor. Setting both to zero still requires strictly smaller output. The encoder stops writing when the maximum acceptable JPEG length is crossed.
+Original-file size minus JPEG-file size must meet the configured byte floor. Zero still requires strictly smaller output. The encoder stops when the maximum acceptable JPEG length is crossed. Byte eligibility is checked against the detected format and dimensions are checked before pixel decode.
 
-Session decisions live in up to 256 expiring slots. The slot is keyed by input history and the session header when available. A live collision falls back to original images. When provided by the host, the plugin KV stores only versioned metadata and SHA-256 digests for seven days. A restart may recover a recorded JPEG deterministically from the original source and verify its digest. If any recorded JPEG cannot be recovered, the entire image-edit pass falls back to the original body before zstd.
+Session decisions live in up to 256 expiring slots. The slot is keyed by input history and the session header when available. A live collision falls back to original images. When provided by the host, the plugin KV stores only versioned metadata and SHA-256 digests for seven days. A restart regenerates recorded JPEGs from the original source using the stored quality and geometry and verifies each digest. Decisions from before v1.3.0 continue to use their original long-edge geometry. If recovery fails for any recorded JPEG, the image pass forwards the original body before zstd.
 
 Build and verify against the declared 0.2.23 compatibility range with:
 
     make pack GO=/path/to/go PRIVATE_KEY=/private/outside/source/publisher.pem
-    go run -mod=vendor ./tools/checkpackage --host-version 0.2.23 --package dist/openai-upstream-zstd-1.2.2-linux-amd64.s2plugin --public-key dist/publisher-public-key.txt
+    go run -mod=vendor ./tools/checkpackage --host-version 0.2.23 --package dist/openai-upstream-zstd-1.3.0-linux-amd64.s2plugin --public-key dist/publisher-public-key.txt
 
 The check starts the signed executable with the SDK host emulator. Use a separate OAuth test account or isolated gateway to measure real cached tokens, OCR and time to first token.

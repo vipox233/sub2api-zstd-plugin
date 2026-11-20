@@ -18,6 +18,9 @@ func TestConfigDefaultsAndValidation(t *testing.T) {
 	if !cfg.CompressionEnabled || !cfg.FallbackOn415 || cfg.MinBodyBytes != 1024 || cfg.MaxBodyBytes != 512*1024*1024 || cfg.MaxInFlight != 2 || cfg.ProxyMode != "account" {
 		t.Fatalf("unexpected release defaults: %#v", cfg)
 	}
+	if cfg.ImageEnabled || cfg.ImageResizeMode != imageFit1080 || cfg.ImageJPEGQuality != 86 || cfg.ImageMinSavingsBytes != 32768 {
+		t.Fatalf("unexpected default image configuration: %#v", cfg)
+	}
 	for _, raw := range []string{
 		`null`, `[]`, `true`, `{"unknown":true}`, `{} {}`, `{"compression_enabled":"true"}`,
 		`{"min_body_bytes":0}`, `{"min_body_bytes":1048577}`, `{"max_body_bytes":1023}`,
@@ -25,6 +28,9 @@ func TestConfigDefaultsAndValidation(t *testing.T) {
 		`{"max_in_flight":0}`, `{"max_in_flight":5}`,
 		`{"response_header_timeout_seconds":29}`, `{"response_header_timeout_seconds":1801}`,
 		`{"proxy_mode":"environment"}`,
+		`{"image_enabled":null}`, `{"image_resize_mode":"unknown"}`,
+		`{"image_jpeg_quality":0}`, `{"image_jpeg_quality":101}`,
+		`{"image_min_savings_bytes":-1}`, `{"image_min_savings_bytes":33554433}`,
 	} {
 		t.Run(raw, func(t *testing.T) {
 			if _, err := DecodeConfig([]byte(raw)); err == nil {
@@ -43,6 +49,49 @@ func TestConfigDefaultsAndValidation(t *testing.T) {
 		if _, err := DecodeConfig([]byte(raw)); err != nil {
 			t.Fatalf("valid boundary %s: %v", raw, err)
 		}
+	}
+}
+
+func TestImageConfigMigratesSavedSettings(t *testing.T) {
+	raw := []byte(`{"compression_enabled":false,"max_body_bytes":0,"max_in_flight":3,"proxy_mode":"direct","image_enabled":true,"image_jpeg_quality":92,"image_max_long_edge":2560,"image_min_savings_percent":75,"image_min_savings_bytes":1048576}`)
+	p := testPlugin(t, nil)
+	normalized, err := p.ValidateConfig(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(normalized, []byte("image_min_savings_percent")) || bytes.Contains(normalized, []byte("image_max_long_edge")) {
+		t.Fatalf("normalized configuration retained obsolete fields: %s", normalized)
+	}
+	if err := p.ApplyConfig(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	want := DefaultConfig()
+	want.CompressionEnabled, want.MaxBodyBytes, want.MaxInFlight, want.ProxyMode = false, 0, 3, "direct"
+	want.ImageEnabled = true
+	roundTripped, err := DecodeConfig(normalized)
+	if err != nil || roundTripped != want || p.state.config != want {
+		t.Fatalf("unexpected migrated config: normalized=%#v running=%#v err=%v", roundTripped, p.state.config, err)
+	}
+}
+
+func TestImagePresetQualityAndSavings(t *testing.T) {
+	for _, tt := range []struct {
+		raw     string
+		mode    string
+		quality int
+		savings int
+	}{
+		{`{"image_resize_mode":"fit1440"}`, imageFit1440, 92, 32768},
+		{`{"image_resize_mode":"original"}`, imageOriginal, 86, 32768},
+		{`{"image_resize_mode":"fit1440","image_jpeg_quality":77,"image_min_savings_bytes":0,"image_min_savings_percent":25}`, imageFit1440, 77, 0},
+		{`{"image_max_long_edge":0,"image_jpeg_quality":97}`, imageFit1080, 97, 32768},
+	} {
+		t.Run(tt.raw, func(t *testing.T) {
+			cfg, err := DecodeConfig([]byte(tt.raw))
+			if err != nil || cfg.ImageResizeMode != tt.mode || cfg.ImageJPEGQuality != tt.quality || cfg.ImageMinSavingsBytes != tt.savings {
+				t.Fatalf("unexpected image options: %#v (%v)", cfg, err)
+			}
+		})
 	}
 }
 

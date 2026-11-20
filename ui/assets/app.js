@@ -11,16 +11,16 @@
     response_header_timeout_seconds: 600,
     proxy_mode: 'account',
     image_enabled: false,
-    image_jpeg_quality: 92,
-    image_max_long_edge: 0,
-    image_min_savings_percent: 25,
-    image_min_savings_bytes: 256 * 1024
+    image_resize_mode: 'fit1080',
+    image_jpeg_quality: 86,
+    image_min_savings_bytes: 32 * 1024
   };
   var bridge;
   var savedConfig = null;
   var busy = false;
   var disposed = false;
   var stopResize = null;
+  var displayedImageMode = defaults.image_resize_mode;
   var elements = {};
   var ids = [
     'notice', 'config-form', 'config-fields', 'compression_enabled',
@@ -29,7 +29,7 @@
     'reload', 'save', 'test', 'refresh', 'memory-budget', 'save-state', 'stats-time', 'test-message',
     'stat-compressed', 'stat-before', 'stat-after', 'stat-saved',
     'status-details', 'status-json',
-    'image_enabled', 'image_jpeg_quality', 'image_max_long_edge', 'image_min_savings_percent', 'image_min_savings_kib',
+    'image_enabled', 'image_resize_mode', 'image_jpeg_quality', 'image_min_savings_kib',
     'stat-image-before', 'stat-image-after', 'stat-image-wire', 'stat-image-hit', 'stat-image-replaced', 'stat-image-time'
   ];
   ids.forEach(function (id) { elements[id] = document.getElementById(id); });
@@ -37,6 +37,10 @@
   function notice(message, kind) {
     elements.notice.textContent = message;
     elements.notice.className = 'notice' + (kind ? ' ' + kind : '');
+  }
+
+  function presetImageQuality(mode) {
+    return mode === 'fit1440' ? 92 : 86;
   }
 
   function configWithDefaults(config) {
@@ -47,6 +51,12 @@
     Object.keys(defaults).forEach(function (key) {
       normalized[key] = config[key] === undefined ? defaults[key] : config[key];
     });
+    var legacy = config.image_resize_mode === undefined &&
+      (config.image_max_long_edge !== undefined || config.image_min_savings_percent !== undefined);
+    if (config.image_jpeg_quality === undefined || (legacy && config.image_jpeg_quality === 92)) {
+      normalized.image_jpeg_quality = presetImageQuality(normalized.image_resize_mode);
+    }
+    if (legacy) normalized.image_min_savings_bytes = defaults.image_min_savings_bytes;
     return normalized;
   }
 
@@ -60,9 +70,8 @@
       response_header_timeout_seconds: Number(elements.response_header_timeout_seconds.value),
       proxy_mode: elements.proxy_mode.value,
       image_enabled: elements.image_enabled.checked,
+      image_resize_mode: elements.image_resize_mode.value,
       image_jpeg_quality: Number(elements.image_jpeg_quality.value),
-      image_max_long_edge: Number(elements.image_max_long_edge.value),
-      image_min_savings_percent: Number(elements.image_min_savings_percent.value),
       image_min_savings_bytes: Number(elements.image_min_savings_kib.value) * 1024
     };
   }
@@ -96,11 +105,20 @@
     elements.response_header_timeout_seconds.value = normalized.response_header_timeout_seconds;
     elements.proxy_mode.value = normalized.proxy_mode;
     elements.image_enabled.checked = normalized.image_enabled;
+    displayedImageMode = normalized.image_resize_mode;
+    elements.image_resize_mode.value = displayedImageMode;
     elements.image_jpeg_quality.value = normalized.image_jpeg_quality;
-    elements.image_max_long_edge.value = normalized.image_max_long_edge;
-    elements.image_min_savings_percent.value = normalized.image_min_savings_percent;
     elements.image_min_savings_kib.value = normalized.image_min_savings_bytes / 1024;
     savedConfig = normalized;
+    updateSaveState();
+  }
+
+  function updateImageMode() {
+    var next = elements.image_resize_mode.value;
+    if (Number(elements.image_jpeg_quality.value) === presetImageQuality(displayedImageMode)) {
+      elements.image_jpeg_quality.value = presetImageQuality(next);
+    }
+    displayedImageMode = next;
     updateSaveState();
   }
 
@@ -118,7 +136,7 @@
     if (!elements['config-form'].reportValidity()) return null;
     var config = formConfig();
     var numericKeys = ['min_body_bytes', 'max_body_bytes', 'max_in_flight', 'response_header_timeout_seconds',
-      'image_jpeg_quality', 'image_max_long_edge', 'image_min_savings_percent', 'image_min_savings_bytes'];
+      'image_jpeg_quality', 'image_min_savings_bytes'];
     for (var i = 0; i < numericKeys.length; i++) {
       if (!Number.isSafeInteger(config[numericKeys[i]])) {
         notice('数值设置需要填写有效整数。', 'error');
@@ -128,11 +146,6 @@
     if (config.max_body_bytes !== 0 && config.min_body_bytes > config.max_body_bytes) {
       notice('最小请求体不能大于最大压缩请求体。', 'error');
       elements.min_body_bytes.focus();
-      return null;
-    }
-    if (config.image_max_long_edge > 0 && config.image_max_long_edge < 256) {
-      notice('长边上限需填写 0 或 256–8192。', 'error');
-      elements.image_max_long_edge.focus();
       return null;
     }
     return config;
@@ -303,6 +316,7 @@
   elements['config-form'].addEventListener('submit', function (event) { event.preventDefault(); saveConfig(); });
   elements['config-form'].addEventListener('input', updateSaveState);
   elements['config-form'].addEventListener('change', updateSaveState);
+  elements.image_resize_mode.addEventListener('change', updateImageMode);
   elements.reload.addEventListener('click', loadConfig);
   elements.test.addEventListener('click', testConfig);
   elements.refresh.addEventListener('click', refreshStatus);

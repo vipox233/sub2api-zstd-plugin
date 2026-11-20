@@ -1,5 +1,11 @@
 # History
 
+## 1.3.0 - 2026-11-20
+
+- Optimize inline JPEG and opaque static PNG. Add 1080p, 1440p and original-dimension presets, portrait fit and long-image handling.
+- Replace the v1.2.x two-part savings gate with one configurable byte floor. Migrate saved settings and reproduce earlier JPEG decisions with their stored geometry.
+- Cover large and protected images, preset defaults, exact savings thresholds, cache-empty recovery and zstd 415 replay in the regression tests.
+
 ## 1.2.2 - 2026-11-20
 
 - Cancel image session-slot waits when their request ends and release the forwarding reservation promptly.

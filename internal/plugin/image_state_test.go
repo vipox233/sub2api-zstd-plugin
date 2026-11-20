@@ -3,13 +3,19 @@ package plugin
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"image"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -26,9 +32,7 @@ func (ledger testImageLedger) Set(_ context.Context, _, key string, value []byte
 	return nil
 }
 
-func TestImageDecisionRestoresExactURLAfterRestart(t *testing.T) {
-
-	const width, height = 640, 320
+func makeLegacyImageFixture(width, height int) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 	for y := range height {
 		for x := range width {
@@ -40,18 +44,18 @@ func TestImageDecisionRestoresExactURLAfterRestart(t *testing.T) {
 			img.Pix[i], img.Pix[i+1], img.Pix[i+2], img.Pix[i+3] = shade, shade, shade, 255
 		}
 	}
-	var imageBytes bytes.Buffer
-	pngEncoder := png.Encoder{CompressionLevel: png.NoCompression}
-	if err := pngEncoder.Encode(&imageBytes, img); err != nil {
-		t.Fatal(err)
-	}
-	source := imageTestPNG + base64.StdEncoding.EncodeToString(imageBytes.Bytes())
+	return img
+}
+
+func TestImageDecisionRestoresExactURLAfterRestart(t *testing.T) {
+	const width, height = 1600, 1200
+	source := imageTestDataURL(imageTestJPEG, imageTestJPEGSource(t, width, height))
 	body := imageTestTurn(imageTestUser(source, "auto"))
 	state := testImageLedger{}
 	before := imageTestPlugin(t, nil)
 	before.images.kv = state
 	selected := imageTestUnpack(t, imageTestSend(t, before, body), "zstd")
-	imageTestReadJPEG(t, selected, width, height)
+	imageTestReadJPEG(t, selected, 1440, 1080)
 	if len(state) != 1 {
 		t.Fatalf("expected one stored decision, got %d", len(state))
 	}
@@ -60,7 +64,9 @@ func TestImageDecisionRestoresExactURLAfterRestart(t *testing.T) {
 			t.Fatal("ledger must contain metadata only")
 		}
 	}
-	after := imageTestPlugin(t, map[string]any{"image_jpeg_quality": 65, "image_max_long_edge": 640})
+	after := imageTestPlugin(t, map[string]any{
+		"image_resize_mode": "fit1440", "image_jpeg_quality": 65, "image_min_savings_bytes": 32 << 20,
+	})
 	after.images.kv = state
 	// Simulate a restart with an empty cache and a slot occupied by an
 	// unrelated encode. The recorded image must wait instead of reverting.
@@ -70,6 +76,59 @@ func TestImageDecisionRestoresExactURLAfterRestart(t *testing.T) {
 	restored := imageTestUnpack(t, imageTestSend(t, after, body), "zstd")
 	if !bytes.Equal(selected, restored) {
 		t.Fatal("cold restart or new config changed the recorded representation")
+	}
+}
+
+func TestImageDecisionReplaysLegacyPNGAfterUpgrade(t *testing.T) {
+	const width, height, oldEdge = 1024, 512, 512
+	source := imageTestDataURL(imageTestPNG, imageTestEncodePNG(t, makeLegacyImageFixture(width, height)))
+	body := imageTestTurn(imageTestUser(source, "auto"))
+	var oldJPEG bytes.Buffer
+	// Halving these two uniform blocks keeps each value under the old bilinear scaler.
+	oldPixels := makeLegacyImageFixture(oldEdge, height/2)
+	if err := jpeg.Encode(&oldJPEG, oldPixels, &jpeg.Options{Quality: 92}); err != nil {
+		t.Fatal(err)
+	}
+	oldURL := imageTestDataURL(imageTestJPEG, oldJPEG.Bytes())
+	want := imageTestTurn(imageTestUser(oldURL, "auto"))
+
+	var raw spool
+	defer raw.close()
+	if _, err := raw.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	input, err := scanImageRequest(ctx, &raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor, hashes, _, err := prefixHashes(ctx, &raw, input.items, imageTestRequest(t, body).Header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputHash := sha256.Sum256([]byte(strings.TrimPrefix(source, imageTestPNG)))
+	legacy := struct {
+		Anchor    [sha256.Size]byte
+		Expires   int64
+		Prefixes  []imagePrefix
+		Decisions map[string]json.RawMessage
+	}{
+		Anchor: anchor, Expires: time.Now().Add(time.Hour).Unix(),
+		Prefixes: []imagePrefix{{Count: len(hashes), Digest: hashes[len(hashes)-1]}},
+		Decisions: map[string]json.RawMessage{
+			hex.EncodeToString(inputHash[:]): json.RawMessage(fmt.Sprintf(
+				`{"Profile":{"Quality":92,"LongEdge":%d},"Digest":"%s"}`, oldEdge, imageDigest(oldURL))),
+		},
+	}
+	stored, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := imageTestPlugin(t, nil)
+	p.images.kv = testImageLedger{strconv.Itoa(int(anchor[0])): stored}
+	got := imageTestUnpack(t, imageTestSend(t, p, body), "zstd")
+	if !bytes.Equal(got, want) {
+		t.Fatal("upgrading changed the recorded PNG-to-JPEG representation")
 	}
 }
 
@@ -208,9 +267,9 @@ func probeScreenshot(w, h int, chroma bool) *image.RGBA {
 }
 
 func Example_replacementLimit() {
-	fmt.Println(replacementLimit(512<<10, 25, 256<<10))
-	fmt.Println(replacementLimit(2<<20, 25, 256<<10))
+	fmt.Println(replacementLimit(512<<10, 32<<10))
+	fmt.Println(replacementLimit(2<<20, 32<<10))
 	// Output:
-	// 262144
-	// 1572864
+	// 491520
+	// 2064384
 }

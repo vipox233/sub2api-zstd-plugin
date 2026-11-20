@@ -20,20 +20,18 @@ import (
 )
 
 const (
-	maxImageBodyBytes     = 64 << 20
-	maxImageEditsBytes    = 16 << 20
-	imageCacheBytes       = 32 << 20
-	imageCacheItems       = 128
-	imageCacheTTL         = 2 * time.Hour
-	imageSessionTTL       = 7 * 24 * time.Hour
-	imageSessionSlots     = 256
-	imageSessionPrefixes  = 8
-	imageRequestBudget    = 1400 * time.Millisecond
-	imageCodecBudget      = 550 * time.Millisecond
-	imageLargeCodecBudget = 1050 * time.Millisecond
-	imageKVTimeout        = 40 * time.Millisecond
-	imageKVNamespace      = "image-decisions-v1"
-	maxLedgerBytes        = 48 << 10
+	maxImageBodyBytes    = 64 << 20
+	maxImageEditsBytes   = 16 << 20
+	imageCacheBytes      = 32 << 20
+	imageCacheItems      = 128
+	imageCacheTTL        = 2 * time.Hour
+	imageSessionTTL      = 7 * 24 * time.Hour
+	imageSessionSlots    = 256
+	imageSessionPrefixes = 8
+	imageRequestBudget   = 5 * time.Second
+	imageKVTimeout       = 40 * time.Millisecond
+	imageKVNamespace     = "image-decisions-v1"
+	maxLedgerBytes       = 48 << 10
 )
 
 type imageEdit struct {
@@ -410,13 +408,13 @@ func (o *imageOptimizer) applyParts(ctx, freshWork context.Context, state *image
 	bytesUsed := 0
 	for i, item := range items {
 		for _, part := range item.images {
-			input, reason := inspectPNGDataURL(raw, part.url)
+			input, reason := inspectImageDataURL(raw, part.url)
 			if input.raw == nil {
 				o.stats.skip(reason)
 				continue
 			}
 			o.stats.candidates.Add(1)
-			// Canonical Base64 is a unique representation of the PNG bytes.
+			// Canonical Base64 is a unique representation of the source bytes.
 			// Hash it directly so cache hits never allocate a decoded file.
 			hash := sha256.New()
 			if _, err := io.Copy(hash, input.reader(ctx)); err != nil {
@@ -430,12 +428,12 @@ func (o *imageOptimizer) applyParts(ctx, freshWork context.Context, state *image
 				key += "o"
 			}
 			prior, seen := state.Decisions[key]
-			edge := c.ImageMaxLongEdge
+			mode := c.ImageResizeMode
 			if part.keepSize {
-				edge = 0
+				mode = imageOriginal
 			}
-			profile := imageProfile{Quality: c.ImageJPEGQuality, LongEdge: edge}
-			limit := replacementLimit(input.size, c.ImageMinSavingsPercent, c.ImageMinSavingsBytes)
+			profile := imageProfile{Quality: c.ImageJPEGQuality, ResizeMode: mode}
+			limit := replacementLimit(input.size, c.ImageMinSavingsBytes)
 			if seen {
 				if prior.Digest == "" {
 					continue
@@ -451,6 +449,10 @@ func (o *imageOptimizer) applyParts(ctx, freshWork context.Context, state *image
 					o.stats.skip("history")
 					continue
 				}
+			}
+			if limit <= 0 {
+				o.stats.skip("no_gain")
+				continue
 			}
 			cacheKey := imageCacheKey{source: source, profile: profile}
 			jpg := o.cached(cacheKey)
@@ -500,11 +502,11 @@ func (o *imageOptimizer) applyParts(ctx, freshWork context.Context, state *image
 	return edits, newJPEGs, true
 }
 
-func (o *imageOptimizer) coldEncode(ctx context.Context, key imageCacheKey, input pngSource, limit int, restore bool) *cachedImage {
+func (o *imageOptimizer) coldEncode(ctx context.Context, key imageCacheKey, input imageSource, limit int, restore bool) *cachedImage {
 	if restore {
 		// An already-sent image must survive eviction and a busy encoder.
 		// The size/pixel guard still applies. Wait for one bounded worker
-		// and honor the caller's cancellation instead of the new-image timer.
+		// and honor the caller's cancellation instead of the fresh-work budget.
 		select {
 		case o.cold <- struct{}{}:
 		case <-ctx.Done():
@@ -523,26 +525,12 @@ func (o *imageOptimizer) coldEncode(ctx context.Context, key imageCacheKey, inpu
 		o.stats.skip("timeout")
 		return nil
 	}
-	if limit <= 0 {
-		o.stats.skip("no_gain")
-		return nil
-	}
-	work := ctx
-	if !restore {
-		budget := imageCodecBudget
-		if input.pixels > 4_000_000 {
-			budget = imageLargeCodecBudget
-		}
-		var cancel context.CancelFunc
-		work, cancel = context.WithTimeout(ctx, budget)
-		defer cancel()
-	}
-	data, err := input.decode(work)
+	data, err := input.decode(ctx)
 	if err != nil {
-		o.stats.skip(imageCodecReason(work))
+		o.stats.skip(imageCodecReason(ctx, input.format))
 		return nil
 	}
-	url, reason := transcodePNG(work, data, key.profile, limit)
+	url, reason := transcodeImage(ctx, data, input.format, key.profile, limit)
 	if url == "" {
 		o.stats.skip(reason)
 		return nil

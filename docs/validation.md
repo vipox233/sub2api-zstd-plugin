@@ -1,5 +1,11 @@
 # Release validation
 
+## v1.3.0
+
+The Go and UI regression suites cover JPEG and opaque PNG, all size presets, portrait and long-image geometry, the 32 KiB boundary and zero setting, saved configuration migration, and protected-image passthrough. They also check exact JPEG recovery after restart, legacy PNG decisions saved by v1.2.x, byte-local JSON edits and the HTTP 415 retry body.
+
+In a synthetic 8000 × 6000 JPEG probe, the 30,121,880-byte source became a 1440 × 1080 JPEG of 332,574 bytes. The final zstd body was 330,160 bytes. These figures describe the generated test image.
+
 ## v1.2.2
 
 Go 1.27.3 on Linux amd64. The signed package passed startup, health and zstd self-test with the SDK host emulator configured for Sub2API 0.2.23. Its publisher public key matches v1.1.0.

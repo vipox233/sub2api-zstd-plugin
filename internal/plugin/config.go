@@ -9,6 +9,14 @@ import (
 	"io"
 )
 
+const (
+	imageFit1080           = "fit1080"
+	imageFit1440           = "fit1440"
+	imageOriginal          = "original"
+	defaultImageMinSavings = 32 << 10
+	legacyImageJPEGQuality = 92
+)
+
 // Config contains no credentials; the host supplies each account's proxy.
 type Config struct {
 	CompressionEnabled           bool   `json:"compression_enabled"`
@@ -19,9 +27,8 @@ type Config struct {
 	ResponseHeaderTimeoutSeconds int64  `json:"response_header_timeout_seconds"`
 	ProxyMode                    string `json:"proxy_mode"`
 	ImageEnabled                 bool   `json:"image_enabled"`
+	ImageResizeMode              string `json:"image_resize_mode"`
 	ImageJPEGQuality             int    `json:"image_jpeg_quality"`
-	ImageMaxLongEdge             int    `json:"image_max_long_edge"`
-	ImageMinSavingsPercent       int    `json:"image_min_savings_percent"`
 	ImageMinSavingsBytes         int    `json:"image_min_savings_bytes"`
 }
 
@@ -30,13 +37,20 @@ func DefaultConfig() Config {
 	return Config{
 		CompressionEnabled: true, MinBodyBytes: 1024, MaxBodyBytes: 512 << 20,
 		MaxInFlight: 2, FallbackOn415: true, ResponseHeaderTimeoutSeconds: 600, ProxyMode: "account",
-		ImageJPEGQuality: 92, ImageMinSavingsPercent: 25, ImageMinSavingsBytes: 256 << 10,
+		ImageResizeMode: imageFit1080, ImageJPEGQuality: presetImageQuality(imageFit1080),
+		ImageMinSavingsBytes: defaultImageMinSavings,
 	}
+}
+
+func presetImageQuality(mode string) int {
+	if mode == imageFit1440 {
+		return 92
+	}
+	return 86
 }
 
 // DecodeConfig strictly parses a single JSON object and fills missing defaults.
 func DecodeConfig(raw []byte) (Config, error) {
-	c := DefaultConfig()
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
 		raw = []byte("{}")
@@ -56,11 +70,32 @@ func DecodeConfig(raw []byte) (Config, error) {
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
-	if err := d.Decode(&c); err != nil {
+	var saved struct {
+		Config
+		Mode                 *string `json:"image_resize_mode"`
+		Quality              *int    `json:"image_jpeg_quality"`
+		LegacyLongEdge       *int    `json:"image_max_long_edge"`
+		LegacySavingsPercent *int    `json:"image_min_savings_percent"`
+	}
+	saved.Config = DefaultConfig()
+	if err := d.Decode(&saved); err != nil {
 		return Config{}, fmt.Errorf("配置解析失败: %w", err)
 	}
 	if err := d.Decode(new(any)); err != io.EOF {
 		return Config{}, errors.New("配置只能包含一个 JSON 对象")
+	}
+	c := saved.Config
+	legacy := saved.Mode == nil && (saved.LegacyLongEdge != nil || saved.LegacySavingsPercent != nil)
+	if saved.Mode != nil {
+		c.ImageResizeMode = *saved.Mode
+	}
+	c.ImageJPEGQuality = presetImageQuality(c.ImageResizeMode)
+	if saved.Quality != nil && (!legacy || *saved.Quality != legacyImageJPEGQuality) {
+		c.ImageJPEGQuality = *saved.Quality
+	}
+	if legacy {
+		// A saved byte floor from the old two-floor policy does not carry over.
+		c.ImageMinSavingsBytes = defaultImageMinSavings
 	}
 	if c.MinBodyBytes < 1 || c.MinBodyBytes > 1<<20 {
 		return Config{}, errors.New("min_body_bytes 必须在 1–1048576 之间")
@@ -82,11 +117,13 @@ func DecodeConfig(raw []byte) (Config, error) {
 	if c.ImageJPEGQuality < 1 || c.ImageJPEGQuality > 100 {
 		return Config{}, errors.New("image_jpeg_quality 必须在 1–100 之间")
 	}
-	if c.ImageMaxLongEdge != 0 && (c.ImageMaxLongEdge < 256 || c.ImageMaxLongEdge > imageMaxSourceEdge) {
-		return Config{}, errors.New("image_max_long_edge 必须为 0 或 256–8192")
+	switch c.ImageResizeMode {
+	case imageFit1080, imageFit1440, imageOriginal:
+	default:
+		return Config{}, errors.New("image_resize_mode 必须为 fit1080、fit1440 或 original")
 	}
-	if c.ImageMinSavingsPercent < 0 || c.ImageMinSavingsPercent > 100 || c.ImageMinSavingsBytes < 0 || c.ImageMinSavingsBytes > imageMaxPNGBytes {
-		return Config{}, errors.New("图片节省阈值须在 0–100% 和 0–24 MiB 之间")
+	if c.ImageMinSavingsBytes < 0 || c.ImageMinSavingsBytes > imageMaxJPEGBytes {
+		return Config{}, errors.New("image_min_savings_bytes 必须在 0–33554432 之间")
 	}
 	return c, nil
 }

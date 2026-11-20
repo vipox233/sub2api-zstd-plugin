@@ -19,10 +19,9 @@ const defaults = {
   max_in_flight: 2, fallback_on_415: true, response_header_timeout_seconds: 600,
   proxy_mode: 'account',
   image_enabled: false,
-  image_jpeg_quality: 92,
-  image_max_long_edge: 0,
-  image_min_savings_percent: 25,
-  image_min_savings_bytes: 262144
+  image_resize_mode: 'fit1080',
+  image_jpeg_quality: 86,
+  image_min_savings_bytes: 32768
 };
 const snapshot = {
   version: '1.1.0', algorithm: 'zstd', level: 3, config: defaults,
@@ -224,12 +223,38 @@ test('large and unlimited limits save without the former aggregate budget', asyn
   }
 });
 
-test('old saved 16 MiB settings are not silently rewritten during upgrade', async () => {
-  const oldConfig = {...defaults, max_body_bytes:16 * MiB};
+test('old image settings migrate while the saved zstd cap stays at 16 MiB', async () => {
+  const oldConfig = {...defaults, max_body_bytes:16 * MiB, image_enabled:true, image_jpeg_quality:92,
+    image_max_long_edge:0, image_min_savings_percent:25, image_min_savings_bytes:262144};
+  delete oldConfig.image_resize_mode;
   const h = harness({autoReply:true, config:oldConfig}); h.runApp(); await settle();
   assert.equal(h.elements.get('max_body_mib').value, '16');
+  assert.equal(h.elements.get('image_enabled').checked, true);
+  assert.equal(h.elements.get('image_resize_mode').value, 'fit1080');
+  assert.equal(h.elements.get('image_jpeg_quality').value, '86');
+  assert.equal(h.elements.get('image_min_savings_kib').value, '32');
+  assert.equal(h.callTypes().includes('config.save'), false);
   h.elements.get('config-form').fire('submit'); await settle();
-  assert.equal(h.messages.find(m => m.type === 'config.save').config.max_body_bytes, 16 * MiB);
+  const saved = h.messages.find(m => m.type === 'config.save').config;
+  assert.deepEqual(saved, {...defaults, max_body_bytes:16 * MiB, image_enabled:true});
+  h.disposeApp();
+});
+
+test('changing size presets switches default quality and preserves a custom quality', async () => {
+  const h = harness({autoReply:true}); h.runApp(); await settle();
+  const mode = h.elements.get('image_resize_mode');
+  const quality = h.elements.get('image_jpeg_quality');
+  mode.value = 'fit1440'; mode.fire('change');
+  assert.equal(quality.value, '92');
+  mode.value = 'original'; mode.fire('change');
+  assert.equal(quality.value, '86');
+  quality.value = '79';
+  mode.value = 'fit1440'; mode.fire('change');
+  assert.equal(quality.value, '79');
+  h.elements.get('image_min_savings_kib').value = '0';
+  h.elements.get('config-form').fire('submit'); await settle();
+  const saved = h.messages.find(m => m.type === 'config.save').config;
+  assert.deepEqual(saved, {...defaults, image_resize_mode:'fit1440', image_jpeg_quality:79, image_min_savings_bytes:0});
   h.disposeApp();
 });
 

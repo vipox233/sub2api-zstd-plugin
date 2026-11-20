@@ -9,16 +9,17 @@ import (
 	"errors"
 	"image"
 	"image/jpeg"
-	"image/png"
+	_ "image/png"
 	"io"
 	"strings"
 )
 
 const (
-	imageMinPNGBytes   = 512 << 10
+	imageMaxJPEGBytes  = 32 << 20
+	imageMaxJPEGPixel  = 48_000_000
 	imageMaxPNGBytes   = 24 << 20
-	imageMaxPixels     = 12_000_000
-	imageMaxSourceEdge = 8192
+	imageMaxPNGPixel   = 24_000_000
+	imageMaxSourceEdge = 12_000
 	jpegDataURLPrefix  = "data:image/jpeg;base64,"
 )
 
@@ -26,8 +27,10 @@ var pngMagic = []byte{137, 'P', 'N', 'G', 13, 10, 26, 10}
 var errImageSavings = errors.New("JPEG exceeds the allowed replacement size")
 
 type imageProfile struct {
-	Quality  int
-	LongEdge int
+	Quality    int
+	ResizeMode string `json:",omitempty"`
+	// Preserve the pre-v1.3.0 geometry for persisted PNG decisions.
+	LongEdge int `json:",omitempty"`
 }
 
 type contextImageReader struct {
@@ -42,35 +45,67 @@ func (r contextImageReader) Read(p []byte) (int, error) {
 	return r.Reader.Read(p)
 }
 
-type pngSource struct {
+type imageFormat uint8
+
+const (
+	imagePNG imageFormat = iota
+	imageJPEG
+)
+
+func (f imageFormat) limits() (size, pixels int) {
+	if f == imageJPEG {
+		return imageMaxJPEGBytes, imageMaxJPEGPixel
+	}
+	return imageMaxPNGBytes, imageMaxPNGPixel
+}
+
+type imageSource struct {
 	raw        *spool
 	start, end int64
 	size       int
-	pixels     int
+	format     imageFormat
 }
 
-func inspectPNGDataURL(raw *spool, span jsonRange) (pngSource, string) {
-	if span.escaped || span.end-span.start > int64(base64.StdEncoding.EncodedLen(imageMaxPNGBytes)+128) {
-		return pngSource{}, "format_or_limit"
+func inspectImageDataURL(raw *spool, span jsonRange) (imageSource, string) {
+	if span.escaped || span.end-span.start > int64(base64.StdEncoding.EncodedLen(imageMaxJPEGBytes)+128) {
+		return imageSource{}, "format_or_limit"
 	}
 	reader := bufio.NewReaderSize(raw.section(span.start+1, span.end-1), 256)
 	header, err := reader.ReadSlice(',')
 	if err != nil {
-		return pngSource{}, ""
+		return imageSource{}, ""
 	}
-	switch strings.ToLower(string(header)) {
-	case "data:image/png;base64,", "data:application/octet-stream;base64,":
+	mime := strings.ToLower(string(header))
+	switch mime {
+	case "data:image/png;base64,", jpegDataURLPrefix, "data:image/jpg;base64,", "data:application/octet-stream;base64,":
 	default:
-		return pngSource{}, ""
+		return imageSource{}, ""
 	}
-	source := pngSource{raw: raw, start: span.start + 1 + int64(len(header)), end: span.end - 1}
+	source := imageSource{raw: raw, start: span.start + 1 + int64(len(header)), end: span.end - 1}
 	encoded := int(source.end - source.start)
-	if encoded < 44 || encoded%4 != 0 {
-		return pngSource{}, "invalid_png"
+	var encodedHeader [12]byte
+	if encoded < len(encodedHeader) || encoded%4 != 0 {
+		return imageSource{}, "format_or_limit"
+	}
+	if _, err := io.ReadFull(reader, encodedHeader[:]); err != nil {
+		return imageSource{}, "format_or_limit"
+	}
+	var magic [9]byte
+	n, err := base64.StdEncoding.Strict().Decode(magic[:], encodedHeader[:])
+	if err != nil {
+		return imageSource{}, "format_or_limit"
+	}
+	switch {
+	case bytes.HasPrefix(magic[:n], pngMagic) && (mime == "data:image/png;base64," || mime == "data:application/octet-stream;base64,"):
+		source.format = imagePNG
+	case n >= 2 && magic[0] == 0xff && magic[1] == 0xd8 && mime != "data:image/png;base64,":
+		source.format = imageJPEG
+	default:
+		return imageSource{}, "format_or_limit"
 	}
 	var tail [2]byte
 	if _, err := io.ReadFull(raw.section(source.end-2, source.end), tail[:]); err != nil {
-		return pngSource{}, "invalid_png"
+		return imageSource{}, "format_or_limit"
 	}
 	source.size = base64.StdEncoding.DecodedLen(encoded)
 	if tail[1] == '=' {
@@ -79,33 +114,18 @@ func inspectPNGDataURL(raw *spool, span jsonRange) (pngSource, string) {
 			source.size--
 		}
 	}
-	if source.size < imageMinPNGBytes || source.size > imageMaxPNGBytes {
-		return pngSource{}, "format_or_limit"
+	maxBytes, _ := source.format.limits()
+	if source.size > maxBytes {
+		return imageSource{}, "format_or_limit"
 	}
-	// Read the signature and IHDR before allocating any image-sized memory.
-	var encodedHeader [44]byte
-	var pngHeader [33]byte
-	if _, err := io.ReadFull(raw.section(source.start, source.start+44), encodedHeader[:]); err != nil {
-		return pngSource{}, "invalid_png"
-	}
-	if n, err := base64.StdEncoding.Strict().Decode(pngHeader[:], encodedHeader[:]); err != nil ||
-		n != len(pngHeader) || !bytes.HasPrefix(pngHeader[:], pngMagic) || string(pngHeader[12:16]) != "IHDR" || pngHeader[24] != 8 {
-		return pngSource{}, "invalid_png"
-	}
-	w := int(binary.BigEndian.Uint32(pngHeader[16:20]))
-	h := int(binary.BigEndian.Uint32(pngHeader[20:24]))
-	if w <= 0 || h <= 0 || w > imageMaxSourceEdge || h > imageMaxSourceEdge || w > imageMaxPixels/h {
-		return pngSource{}, "format_or_limit"
-	}
-	source.pixels = w * h
 	return source, ""
 }
 
-func (s pngSource) reader(ctx context.Context) io.Reader {
+func (s imageSource) reader(ctx context.Context) io.Reader {
 	return contextImageReader{ctx, s.raw.section(s.start, s.end)}
 }
 
-func (s pngSource) decode(ctx context.Context) ([]byte, error) {
+func (s imageSource) decode(ctx context.Context) ([]byte, error) {
 	input := base64.NewDecoder(base64.StdEncoding.Strict(), bufio.NewReaderSize(s.reader(ctx), copyChunkBytes))
 	data := make([]byte, s.size)
 	if _, err := io.ReadFull(input, data); err != nil {
@@ -118,11 +138,9 @@ func (s pngSource) decode(ctx context.Context) ([]byte, error) {
 	return data, nil
 }
 
-// replacementLimit applies both byte and percentage floors to the original
-// image-file size. Integer rounding preserves an inclusive percentage bound.
-func replacementLimit(original, percent, absolute int) int {
-	saved := max(1, absolute, (original*percent+99)/100)
-	return max(0, original-saved)
+// replacementLimit includes a candidate that saves exactly the byte floor.
+func replacementLimit(original, minimum int) int {
+	return max(0, original-max(1, minimum))
 }
 
 type boundedJPEG struct {
@@ -141,31 +159,51 @@ func (w *boundedJPEG) Write(p []byte) (int, error) {
 	return w.Buffer.Write(p)
 }
 
-func transcodePNG(ctx context.Context, raw []byte, profile imageProfile, limit int) (string, string) {
+func transcodeImage(ctx context.Context, raw []byte, format imageFormat, profile imageProfile, limit int) (string, string) {
 	if limit <= 0 {
 		return "", "no_gain"
 	}
-	if !staticEightBitPNG(raw) {
-		return "", "invalid_png"
-	}
-	config, err := png.DecodeConfig(contextImageReader{ctx, bytes.NewReader(raw)})
-	if err != nil {
-		return "", imageCodecReason(ctx)
-	}
-	w, h := config.Width, config.Height
-	if w <= 0 || h <= 0 || w > imageMaxSourceEdge || h > imageMaxSourceEdge || w > imageMaxPixels/h {
+	maxBytes, maxPixels := format.limits()
+	if len(raw) > maxBytes {
 		return "", "format_or_limit"
 	}
-	img, err := png.Decode(contextImageReader{ctx, bytes.NewReader(raw)})
+	// Check dimensions before either decoder allocates a pixel buffer.
+	read := func() io.Reader { return contextImageReader{ctx, bytes.NewReader(raw)} }
+	config, _, err := image.DecodeConfig(read())
+	if err != nil {
+		return "", imageCodecReason(ctx, format)
+	}
+	w, h := config.Width, config.Height
+	if w <= 0 || h <= 0 || w > imageMaxSourceEdge || h > imageMaxSourceEdge || w > maxPixels/h {
+		return "", "format_or_limit"
+	}
+	orientation := 1
+	if format == imageJPEG {
+		var ok bool
+		orientation, ok = stillJPEGOrientation(ctx, raw)
+		if !ok {
+			return "", imageCodecReason(ctx, format)
+		}
+	} else if !staticPNG(ctx, raw) {
+		return "", imageCodecReason(ctx, format)
+	}
+	img, _, err := image.Decode(read())
 	if err != nil || img.Bounds().Dx() != w || img.Bounds().Dy() != h {
-		return "", imageCodecReason(ctx)
+		return "", imageCodecReason(ctx, format)
 	}
-	opaque, ok := img.(interface{ Opaque() bool })
-	if !ok || !opaque.Opaque() {
-		return "", "transparent"
+	if format == imagePNG {
+		opaque, ok := img.(interface{ Opaque() bool })
+		if !ok || !opaque.Opaque() {
+			return "", "transparent"
+		}
 	}
-	if profile.LongEdge > 0 && max(w, h) > profile.LongEdge {
-		img = scaleImage(ctx, img, profile.LongEdge)
+	if orientation != 1 {
+		img = orientedJPEG{Image: img, orientation: orientation}
+		w, h = img.Bounds().Dx(), img.Bounds().Dy()
+	}
+	dw, dh := targetImageSize(w, h, profile)
+	if dw != w || dh != h {
+		img = scaleImage(ctx, img, dw, dh)
 		if img == nil {
 			return "", "timeout"
 		}
@@ -176,25 +214,31 @@ func transcodePNG(ctx context.Context, raw []byte, profile imageProfile, limit i
 		return "", "no_gain"
 	}
 	if err != nil || ctx.Err() != nil || output.Len() == 0 {
-		return "", imageCodecReason(ctx)
+		return "", imageCodecReason(ctx, format)
 	}
 	return jpegDataURLPrefix + base64.StdEncoding.EncodeToString(output.Bytes()), ""
 }
 
-func imageCodecReason(ctx context.Context) string {
+func imageCodecReason(ctx context.Context, format imageFormat) string {
 	if ctx.Err() != nil {
 		return "timeout"
+	}
+	if format == imageJPEG {
+		return "invalid_jpeg"
 	}
 	return "invalid_png"
 }
 
-func staticEightBitPNG(raw []byte) bool {
-	if len(raw) < 33 || !bytes.HasPrefix(raw, pngMagic) || string(raw[12:16]) != "IHDR" || raw[24] != 8 {
+func staticPNG(ctx context.Context, raw []byte) bool {
+	if len(raw) < 33 || !bytes.HasPrefix(raw, pngMagic) || string(raw[12:16]) != "IHDR" || raw[24] > 8 {
 		return false
 	}
 	// Go's PNG decoder returns a still image even if an APNG contains frames.
 	// Leave animated input and EXIF orientation metadata to the upstream.
 	for offset := 8; offset+12 <= len(raw); {
+		if ctx.Err() != nil {
+			return false
+		}
 		n := uint64(binary.BigEndian.Uint32(raw[offset:]))
 		if n > uint64(len(raw)-offset-12) {
 			return false
@@ -211,6 +255,35 @@ func staticEightBitPNG(raw []byte) bool {
 	return false
 }
 
+func targetImageSize(w, h int, profile imageProfile) (int, int) {
+	long, short := max(w, h), min(w, h)
+	var numerator, denominator int
+	switch profile.ResizeMode {
+	case "":
+		// Reproduce the old long-edge-only fit, including for long images.
+		numerator, denominator = profile.LongEdge, long
+	case imageFit1080, imageFit1440:
+		if long >= 3*short {
+			return w, h
+		}
+		longLimit, shortLimit := 1920, 1080
+		if profile.ResizeMode == imageFit1440 {
+			longLimit, shortLimit = 2560, 1440
+		}
+		numerator, denominator = longLimit, long
+		if shortLimit*long < longLimit*short {
+			numerator, denominator = shortLimit, short
+		}
+	default:
+		return w, h
+	}
+	if numerator <= 0 || numerator >= denominator {
+		return w, h
+	}
+	return max(1, (w*numerator+denominator/2)/denominator),
+		max(1, (h*numerator+denominator/2)/denominator)
+}
+
 type sampleAxis struct {
 	lo, hi int
 	weight uint32
@@ -219,12 +292,9 @@ type sampleAxis struct {
 // Bilinear sampling uses fixed-point pixel centers, so JPEG generation has
 // the same inputs after restart. Only one output image and a row's x-axis
 // weights are allocated. Each source axis always spans the complete image.
-func scaleImage(ctx context.Context, src image.Image, maxEdge int) image.Image {
+func scaleImage(ctx context.Context, src image.Image, dw, dh int) image.Image {
 	b := src.Bounds()
 	w, h := b.Dx(), b.Dy()
-	long := max(w, h)
-	dw := max(1, (w*maxEdge+long/2)/long)
-	dh := max(1, (h*maxEdge+long/2)/long)
 	out := image.NewRGBA(image.Rect(0, 0, dw, dh))
 	xs := make([]sampleAxis, dw)
 	for x := range xs {

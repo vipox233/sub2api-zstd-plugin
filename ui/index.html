@@ -17,7 +17,7 @@
         <h1>OpenAI 上游请求压缩</h1>
         <p class="subtitle">优化内联截图和请求体，减少上传到 Codex 上游的数据量。</p>
       </div>
-      <span class="codec">v1.2.2 · JPEG / zstd</span>
+      <span class="codec">v1.3.0 · JPEG / zstd</span>
     </header>
 
     <div id="notice" class="notice" role="status" aria-live="polite">正在读取已保存配置…</div>
@@ -92,29 +92,30 @@
         <section class="panel" aria-labelledby="image-title">
           <label class="checkbox-row" for="image_enabled">
             <input id="image_enabled" type="checkbox">
-            <span><strong id="image-title">启用图片优化</strong><small>大 PNG 截图先转为 JPEG，再压缩请求。开启后从新对话开始验证。</small></span>
+            <span><strong id="image-title">启用图片优化</strong><small>将符合条件的 JPEG 和静态不透明 PNG 重编码为 JPEG，再压缩请求体。</small></span>
           </label>
           <div class="field-grid">
+            <label class="field" for="image_resize_mode">
+              <span>尺寸档位</span>
+              <select id="image_resize_mode">
+                <option value="fit1080">1080p · 1920 × 1080</option>
+                <option value="fit1440">1440p · 2560 × 1440</option>
+                <option value="original">原尺寸重编码</option>
+              </select>
+              <small>等比缩小。竖图对调宽高上限，长短边比达到 3:1 时保留尺寸。</small>
+            </label>
             <label class="field" for="image_jpeg_quality">
               <span>JPEG 画质</span>
-              <input id="image_jpeg_quality" type="number" value="92" min="1" max="100" step="1" required>
-              <small>截图建议 92，优先保留细字。</small>
-            </label>
-            <label class="field" for="image_max_long_edge">
-              <span>长边上限 <span class="unit">px</span></span>
-              <input id="image_max_long_edge" type="number" value="0" min="0" max="8192" step="1" required>
-              <small>0 保留尺寸。可填 2560 等比缩小普通截图。</small>
-            </label>
-            <label class="field" for="image_min_savings_percent">
-              <span>至少节省 <span class="unit">%</span></span>
-              <input id="image_min_savings_percent" type="number" value="25" min="0" max="100" step="1" required>
+              <input id="image_jpeg_quality" type="number" value="86" min="1" max="100" step="1" required>
+              <small>1080p 和原尺寸预设 86，1440p 预设 92。</small>
             </label>
             <label class="field" for="image_min_savings_kib">
               <span>至少节省 <span class="unit">KiB</span></span>
-              <input id="image_min_savings_kib" type="number" value="256" min="0" max="24576" step="any" required>
+              <input id="image_min_savings_kib" type="number" value="32" min="0" max="32768" step="any" required>
+              <small>按图片文件字节计算。填 0 时，候选更小就采用。</small>
             </label>
           </div>
-          <p class="hint">两道门槛均按图片文件字节计算，达到两道门槛才替换。透明 PNG、电脑操作截图和不符合条件的图片使用原图。</p>
+          <p class="hint">透明 PNG、动画、超限图片和电脑操作截图使用原图。</p>
         </section>
 
       </fieldset>
