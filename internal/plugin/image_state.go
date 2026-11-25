@@ -298,7 +298,6 @@ func imageDigest(value string) string {
 
 func (o *imageOptimizer) optimize(ctx context.Context, raw *spool, c Config, h http.Header) []imageEdit {
 	began := time.Now()
-	defer func() { o.stats.micros.Add(time.Since(began).Microseconds()) }()
 	work, cancel := context.WithTimeout(ctx, imageRequestBudget)
 	defer cancel()
 	request, err := scanImageRequest(work, raw)
@@ -377,10 +376,8 @@ func (o *imageOptimizer) optimize(ctx context.Context, raw *spool, c Config, h h
 	result := make([]imageEdit, 0, len(edits))
 	for _, edit := range edits {
 		result = append(result, edit.imageEdit)
-		o.stats.changed.Add(1)
-		o.stats.sourceBytes.Add(int64(edit.sourceBytes))
-		o.stats.jpegBytes.Add(int64(edit.jpegBytes))
 	}
+	o.stats.recordReplacements(edits, time.Since(began))
 	return result
 }
 

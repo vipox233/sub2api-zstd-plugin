@@ -173,6 +173,25 @@ test('app loads saved configuration and read-only status automatically; negative
   assert.equal(h.intervals.size, 0);
 });
 
+test('image cards show per-request average and image savings, then clear when no samples are present', async () => {
+  let images = {
+    requests: 2, replaced: 3, processing_milliseconds: 25,
+    average_processing_milliseconds: 12.5, saving_percent: 75.5
+  };
+  const h = harness({ autoReply: true, handlers: { 'plugin.status': () => ({ result: {
+    healthy: true, status_json: JSON.stringify({ ...snapshot, images })
+  } }) } });
+  h.runApp(); await settle();
+  assert.equal(h.elements.get('stat-image-time').textContent, '12.5 ms');
+  assert.equal(h.elements.get('stat-image-saved').textContent, '75.5%');
+
+  images = { requests: 0, replaced: 0, average_processing_milliseconds: null, saving_percent: null };
+  h.elements.get('refresh').fire('click'); await settle();
+  assert.equal(h.elements.get('stat-image-time').textContent, '—');
+  assert.equal(h.elements.get('stat-image-saved').textContent, '—');
+  h.disposeApp();
+});
+
 test('app saves exact byte units, accepts normalized config, and refreshes without saving edits', async () => {
   const h = harness({ autoReply: true }); h.runApp(); await settle();
   h.elements.get('max_body_mib').value = '8';

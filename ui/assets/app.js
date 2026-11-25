@@ -31,7 +31,8 @@
     'stat-compressed', 'stat-before', 'stat-after', 'stat-saved',
     'status-details', 'status-json',
     'image_enabled', 'image_max_body_mib', 'image_resize_mode', 'image_jpeg_quality', 'image_min_savings_kib',
-    'stat-image-before', 'stat-image-after', 'stat-image-wire', 'stat-image-hit', 'stat-image-replaced', 'stat-image-time'
+    'stat-image-before', 'stat-image-after', 'stat-image-saved', 'stat-image-wire',
+    'stat-image-hit', 'stat-image-replaced', 'stat-image-time'
   ];
   ids.forEach(function (id) { elements[id] = document.getElementById(id); });
 
@@ -192,13 +193,15 @@
   function renderImageStats(stats) {
     elements['stat-image-before'].textContent = bytesLabel(numberAt(stats, ['before_bytes']));
     elements['stat-image-after'].textContent = bytesLabel(numberAt(stats, ['after_bytes']));
+    var saving = numberAt(stats, ['saving_percent']);
+    elements['stat-image-saved'].textContent = saving === null ? '—' : saving.toFixed(1) + '%';
     elements['stat-image-wire'].textContent = bytesLabel(numberAt(stats, ['wire_bytes']));
     var hits = numberAt(stats, ['cache_hits']);
     var misses = numberAt(stats, ['cache_misses']);
     elements['stat-image-hit'].textContent = hits + misses > 0 ? (100 * hits / (hits + misses)).toFixed(1) + '%' : '—';
     var count = numberAt(stats, ['replaced']);
     elements['stat-image-replaced'].textContent = count === null ? '—' : count.toLocaleString('zh-CN');
-    var time = numberAt(stats, ['processing_milliseconds']);
+    var time = numberAt(stats, ['average_processing_milliseconds']);
     elements['stat-image-time'].textContent = time === null ? '—' : time.toFixed(1) + ' ms';
   }
 

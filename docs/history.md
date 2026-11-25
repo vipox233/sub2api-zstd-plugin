@@ -4,6 +4,7 @@
 
 - Make the image rewrite request-size limit configurable independently of zstd, with 64 MiB as the default and zero for unlimited.
 - Allow positive integer compression concurrency settings above four. Existing saved values carry over.
+- Report average image processing time per request with replacements and the byte savings across replaced images.
 - Cover independent limits and unlimited settings for requests with and without Content-Length.
 
 ## 1.3.0 - 2026-11-20

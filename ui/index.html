@@ -149,12 +149,13 @@
       <div class="stats-grid">
         <div class="stat"><span>原始请求体</span><strong id="stat-image-before">—</strong></div>
         <div class="stat"><span>换图后</span><strong id="stat-image-after">—</strong></div>
+        <div class="stat"><span>换图节省比例</span><strong id="stat-image-saved">—</strong></div>
         <div class="stat"><span>预计发送体积</span><strong id="stat-image-wire">—</strong></div>
         <div class="stat"><span>图片缓存命中率</span><strong id="stat-image-hit">—</strong></div>
         <div class="stat"><span>替换次数</span><strong id="stat-image-replaced">—</strong></div>
-        <div class="stat"><span>累计处理耗时</span><strong id="stat-image-time">—</strong></div>
+        <div class="stat"><span>平均换图耗时</span><strong id="stat-image-time">—</strong></div>
       </div>
-      <p class="hint">体积仅计入发生换图的请求。详细统计包含跳过原因、缓存容量和历史图片回退次数。</p>
+      <p class="hint">节省比例按已替换图片的文件体积计算。请求体积和平均耗时只统计发生换图的请求。</p>
     </section>
 
     <footer>
