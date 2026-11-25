@@ -20,7 +20,6 @@ import (
 )
 
 const (
-	maxImageBodyBytes    = 64 << 20
 	maxImageEditsBytes   = 16 << 20
 	imageCacheBytes      = 32 << 20
 	imageCacheItems      = 128

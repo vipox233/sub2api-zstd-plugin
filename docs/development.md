@@ -15,9 +15,10 @@ python3 tools/package.py --binary dist/bin/linux-amd64/openai-upstream-zstd --pr
 Use an independent publisher key for your own builds and register its public key in the host.
 Private signing keys must stay outside release artifacts and the Sub2API runtime data directory.
 
-The request maximum is a size eligibility filter, not a preallocation size. Zero disables this filter.
-Positive sizes use JSON safe integer bytes (maximum 9007199254740991); this numerical representation
-bound is not a practical body-size cap. Resource capacity still applies.
+The image and zstd stages each use a configurable request-size filter. A zero
+value disables the corresponding filter. Both sizes and the concurrency
+setting use JSON-safe integers. The configured values leave allocation to the
+actual requests.
 
 Each spool holds at most 1 MiB of payload before spilling (slice allocator overhead is additional).
 Zstd uses one encoder worker and a 1 MiB window. Raw and encoded bodies may both occupy temporary disk.
@@ -39,7 +40,7 @@ there are few dictionary matches. Incompressible data still uses no-gain bypass.
 
 ## Image optimization
 
-Image processing is independent of the zstd size limit. The scanner reads at most 64 MiB of raw request JSON in chunks and records string offsets. Image edits use at most 16 MiB of replacement URLs per request. The 32 MiB, 128-entry JPEG cache has a two-hour idle lifetime. One worker handles cold conversions, with at most two fresh conversions per request. Scanning and fresh work share a five-second cooperative budget. Restoring a recorded JPEG waits for the same worker and follows the request context. Cache hits hash the Base64 stream without allocating the decoded file.
+Image processing uses the `image_max_body_bytes` filter, which defaults to 64 MiB. The scanner reads eligible request JSON in chunks and records string offsets. For unknown lengths, the spool can read up to the larger active limit or to EOF when either stage has an unlimited size. Image edits use at most 16 MiB of replacement URLs per request. The 32 MiB, 128-entry JPEG cache has a two-hour idle lifetime. One worker handles cold conversions, with at most two fresh conversions per request. Scanning and fresh work share a five-second cooperative budget. Restoring a recorded JPEG waits for the same worker and follows the request context. Cache hits hash the Base64 stream without allocating the decoded file.
 
 Original-file size minus JPEG-file size must meet the configured byte floor. Zero still requires strictly smaller output. The encoder stops when the maximum acceptable JPEG length is crossed. Byte eligibility is checked against the detected format and dimensions are checked before pixel decode.
 
@@ -48,6 +49,6 @@ Session decisions live in up to 256 expiring slots. The slot is keyed by input h
 Build and verify against the declared 0.2.23 compatibility range with:
 
     make pack GO=/path/to/go PRIVATE_KEY=/private/outside/source/publisher.pem
-    go run -mod=vendor ./tools/checkpackage --host-version 0.2.23 --package dist/openai-upstream-zstd-1.3.0-linux-amd64.s2plugin --public-key dist/publisher-public-key.txt
+    go run -mod=vendor ./tools/checkpackage --host-version 0.2.23 --package dist/openai-upstream-zstd-1.4.0-linux-amd64.s2plugin --public-key dist/publisher-public-key.txt
 
 The check starts the signed executable with the SDK host emulator. Use a separate OAuth test account or isolated gateway to measure real cached tokens, OCR and time to first token.

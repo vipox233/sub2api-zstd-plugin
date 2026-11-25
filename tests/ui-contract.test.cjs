@@ -19,6 +19,7 @@ const defaults = {
   max_in_flight: 2, fallback_on_415: true, response_header_timeout_seconds: 600,
   proxy_mode: 'account',
   image_enabled: false,
+  image_max_body_bytes: 64 * MiB,
   image_resize_mode: 'fit1080',
   image_jpeg_quality: 86,
   image_min_savings_bytes: 32768
@@ -160,6 +161,7 @@ test('app loads saved configuration and read-only status automatically; negative
   const h = harness({ autoReply: true }); h.runApp(); await settle();
   assert.deepEqual(h.callTypes(), ['config.load', 'plugin.status']);
   assert.equal(h.elements.get('max_body_mib').value, '512');
+  assert.equal(h.elements.get('image_max_body_mib').value, '64');
   assert.equal(h.elements.get('save').disabled, false);
   assert.equal(h.elements.get('stat-compressed').textContent, '2');
   assert.equal(h.elements.get('stat-saved').textContent, '-25.0%');
@@ -174,13 +176,17 @@ test('app loads saved configuration and read-only status automatically; negative
 test('app saves exact byte units, accepts normalized config, and refreshes without saving edits', async () => {
   const h = harness({ autoReply: true }); h.runApp(); await settle();
   h.elements.get('max_body_mib').value = '8';
-  h.elements.get('max_in_flight').value = '4';
+  h.elements.get('image_max_body_mib').value = '128.5';
+  const concurrency = h.elements.get('max_in_flight');
+  assert.equal(concurrency.attrs.type, 'number');
+  concurrency.value = '8';
   h.elements.get('config-form').fire('input');
   assert.match(h.elements.get('save-state').textContent, /未保存/);
   h.elements.get('config-form').fire('submit'); await settle();
   const save = h.messages.find(m => m.type === 'config.save');
   assert.equal(save.config.max_body_bytes, 8 * MiB);
-  assert.equal(save.config.max_in_flight, 4);
+  assert.equal(save.config.image_max_body_bytes, 128.5 * MiB);
+  assert.equal(save.config.max_in_flight, 8);
   assert.equal(h.elements.get('save-state').textContent, '配置已同步');
   h.elements.get('min_body_bytes').value = '2048';
   h.elements.get('config-form').fire('input');
@@ -213,12 +219,15 @@ test('large and unlimited limits save without the former aggregate budget', asyn
   for (const size of ['512', '1024', '0']) {
     const h = harness({ autoReply: true }); h.runApp(); await settle();
     h.elements.get('max_body_mib').value = size;
+    h.elements.get('image_max_body_mib').value = '0';
     h.elements.get('max_in_flight').value = '4';
     h.elements.get('config-form').fire('submit'); await settle();
     const saved = h.messages.find(m => m.type === 'config.save');
     assert.ok(saved, 'large/unlimited limit must be saveable');
     assert.equal(saved.config.max_body_bytes, Number(size) * MiB);
+    assert.equal(saved.config.image_max_body_bytes, 0);
     assert.equal(h.elements.get('max_body_mib').value, size);
+    assert.equal(h.elements.get('image_max_body_mib').value, '0');
     h.disposeApp();
   }
 });
@@ -227,8 +236,10 @@ test('old image settings migrate while the saved zstd cap stays at 16 MiB', asyn
   const oldConfig = {...defaults, max_body_bytes:16 * MiB, image_enabled:true, image_jpeg_quality:92,
     image_max_long_edge:0, image_min_savings_percent:25, image_min_savings_bytes:262144};
   delete oldConfig.image_resize_mode;
+  delete oldConfig.image_max_body_bytes;
   const h = harness({autoReply:true, config:oldConfig}); h.runApp(); await settle();
   assert.equal(h.elements.get('max_body_mib').value, '16');
+  assert.equal(h.elements.get('image_max_body_mib').value, '64');
   assert.equal(h.elements.get('image_enabled').checked, true);
   assert.equal(h.elements.get('image_resize_mode').value, 'fit1080');
   assert.equal(h.elements.get('image_jpeg_quality').value, '86');

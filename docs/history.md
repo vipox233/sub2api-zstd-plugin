@@ -1,5 +1,11 @@
 # History
 
+## 1.4.0 - 2026-11-25
+
+- Make the image rewrite request-size limit configurable independently of zstd, with 64 MiB as the default and zero for unlimited.
+- Allow positive integer compression concurrency settings above four. Existing saved values carry over.
+- Cover independent limits and unlimited settings for requests with and without Content-Length.
+
 ## 1.3.0 - 2026-11-20
 
 - Optimize inline JPEG and opaque static PNG. Add 1080p, 1440p and original-dimension presets, portrait fit and long-image handling.

@@ -158,10 +158,10 @@ func (p *Plugin) prepareBody(ctx context.Context, src io.ReadCloser, length int6
 	}
 	limit := c.MaxBodyBytes
 	if images {
-		if !compress {
-			limit = maxImageBodyBytes
+		if !compress || c.ImageMaxBodyBytes == 0 {
+			limit = c.ImageMaxBodyBytes
 		} else if limit > 0 {
-			limit = max(limit, maxImageBodyBytes)
+			limit = max(limit, c.ImageMaxBodyBytes)
 		}
 	}
 	var encodeDuringRead io.Writer
@@ -179,10 +179,10 @@ func (p *Plugin) prepareBody(ctx context.Context, src io.ReadCloser, length int6
 		keepSource = true
 		return b, nil
 	}
-	if images && b.raw.size <= maxImageBodyBytes {
+	if images && !bodyExceedsLimit(b.raw.size, c.ImageMaxBodyBytes) {
 		b.edits = p.images.optimize(ctx, &b.raw, c, headers)
 	}
-	if encoder != nil && b.selectedSize() >= c.MinBodyBytes && (c.MaxBodyBytes == 0 || b.raw.size <= c.MaxBodyBytes) {
+	if encoder != nil && b.selectedSize() >= c.MinBodyBytes && !bodyExceedsLimit(b.raw.size, c.MaxBodyBytes) {
 		if images {
 			encoder.ResetContentSize(&b.encoded, b.selectedSize())
 			if _, err = io.CopyBuffer(encoder, contextImageReader{ctx, b.selectedReader()}, buffer); err != nil {
@@ -199,6 +199,10 @@ func (p *Plugin) prepareBody(ctx context.Context, src io.ReadCloser, length int6
 		b.encoded.close()
 	}
 	return b, nil
+}
+
+func bodyExceedsLimit(size, limit int64) bool {
+	return limit > 0 && size > limit
 }
 
 // An unknown-length body exceeding the preparation limit returns the prefix
@@ -225,7 +229,7 @@ func readRequestSpool(ctx context.Context, src io.Reader, length, limit int64, r
 			if _, err := raw.Write(buffer[:n]); err != nil {
 				return false, err
 			}
-			if limit > 0 && raw.size > limit {
+			if bodyExceedsLimit(raw.size, limit) {
 				if readErr != nil && readErr != io.EOF {
 					return false, readErr
 				}

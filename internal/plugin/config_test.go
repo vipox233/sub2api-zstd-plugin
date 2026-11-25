@@ -18,17 +18,18 @@ func TestConfigDefaultsAndValidation(t *testing.T) {
 	if !cfg.CompressionEnabled || !cfg.FallbackOn415 || cfg.MinBodyBytes != 1024 || cfg.MaxBodyBytes != 512*1024*1024 || cfg.MaxInFlight != 2 || cfg.ProxyMode != "account" {
 		t.Fatalf("unexpected release defaults: %#v", cfg)
 	}
-	if cfg.ImageEnabled || cfg.ImageResizeMode != imageFit1080 || cfg.ImageJPEGQuality != 86 || cfg.ImageMinSavingsBytes != 32768 {
+	if cfg.ImageEnabled || cfg.ImageMaxBodyBytes != 64<<20 || cfg.ImageResizeMode != imageFit1080 || cfg.ImageJPEGQuality != 86 || cfg.ImageMinSavingsBytes != 32768 {
 		t.Fatalf("unexpected default image configuration: %#v", cfg)
 	}
 	for _, raw := range []string{
 		`null`, `[]`, `true`, `{"unknown":true}`, `{} {}`, `{"compression_enabled":"true"}`,
 		`{"min_body_bytes":0}`, `{"min_body_bytes":1048577}`, `{"max_body_bytes":1023}`,
 		`{"max_body_bytes":-1}`, `{"max_body_bytes":9007199254740992}`, `{"min_body_bytes":4096,"max_body_bytes":1024}`,
-		`{"max_in_flight":0}`, `{"max_in_flight":5}`,
+		`{"max_in_flight":0}`, `{"max_in_flight":-1}`, `{"max_in_flight":9007199254740992}`,
 		`{"response_header_timeout_seconds":29}`, `{"response_header_timeout_seconds":1801}`,
 		`{"proxy_mode":"environment"}`,
 		`{"image_enabled":null}`, `{"image_resize_mode":"unknown"}`,
+		`{"image_max_body_bytes":-1}`, `{"image_max_body_bytes":9007199254740992}`,
 		`{"image_jpeg_quality":0}`, `{"image_jpeg_quality":101}`,
 		`{"image_min_savings_bytes":-1}`, `{"image_min_savings_bytes":33554433}`,
 	} {
@@ -42,8 +43,10 @@ func TestConfigDefaultsAndValidation(t *testing.T) {
 		`{"max_body_bytes":1024,"min_body_bytes":1024,"max_in_flight":4}`,
 		`{"max_body_bytes":67108864,"max_in_flight":1}`,
 		`{"max_body_bytes":536870912,"max_in_flight":4}`,
-		`{"max_body_bytes":1073741824,"max_in_flight":4}`,
+		`{"max_body_bytes":1073741824,"max_in_flight":8,"image_max_body_bytes":134217728}`,
 		`{"max_body_bytes":0,"max_in_flight":4}`,
+		`{"image_max_body_bytes":0}`,
+		`{"image_max_body_bytes":9007199254740991,"max_in_flight":9007199254740991}`,
 		`{"compression_enabled":false,"fallback_on_415":false,"proxy_mode":"direct"}`,
 	} {
 		if _, err := DecodeConfig([]byte(raw)); err != nil {

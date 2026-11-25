@@ -11,6 +11,7 @@
     response_header_timeout_seconds: 600,
     proxy_mode: 'account',
     image_enabled: false,
+    image_max_body_bytes: 64 * MiB,
     image_resize_mode: 'fit1080',
     image_jpeg_quality: 86,
     image_min_savings_bytes: 32 * 1024
@@ -29,7 +30,7 @@
     'reload', 'save', 'test', 'refresh', 'memory-budget', 'save-state', 'stats-time', 'test-message',
     'stat-compressed', 'stat-before', 'stat-after', 'stat-saved',
     'status-details', 'status-json',
-    'image_enabled', 'image_resize_mode', 'image_jpeg_quality', 'image_min_savings_kib',
+    'image_enabled', 'image_max_body_mib', 'image_resize_mode', 'image_jpeg_quality', 'image_min_savings_kib',
     'stat-image-before', 'stat-image-after', 'stat-image-wire', 'stat-image-hit', 'stat-image-replaced', 'stat-image-time'
   ];
   ids.forEach(function (id) { elements[id] = document.getElementById(id); });
@@ -70,6 +71,7 @@
       response_header_timeout_seconds: Number(elements.response_header_timeout_seconds.value),
       proxy_mode: elements.proxy_mode.value,
       image_enabled: elements.image_enabled.checked,
+      image_max_body_bytes: Number(elements.image_max_body_mib.value) * MiB,
       image_resize_mode: elements.image_resize_mode.value,
       image_jpeg_quality: Number(elements.image_jpeg_quality.value),
       image_min_savings_bytes: Number(elements.image_min_savings_kib.value) * 1024
@@ -90,8 +92,8 @@
     var maxMiB = Number(elements.max_body_mib.value);
     var concurrency = Number(elements.max_in_flight.value);
     elements['memory-budget'].textContent = (maxMiB === 0
-      ? '不设插件大小上限'
-      : '每请求上限 ' + maxMiB + ' MiB') + '；并发 ' + concurrency + '。分块压缩 + 匿名临时文件，不按上限预分配内存。';
+      ? 'Zstd 请求体不限'
+      : 'Zstd 请求体上限 ' + maxMiB + ' MiB') + '，并发 ' + concurrency + '。大请求分块写入匿名临时文件。';
     elements['memory-budget'].className = 'hint budget';
   }
 
@@ -105,6 +107,7 @@
     elements.response_header_timeout_seconds.value = normalized.response_header_timeout_seconds;
     elements.proxy_mode.value = normalized.proxy_mode;
     elements.image_enabled.checked = normalized.image_enabled;
+    elements.image_max_body_mib.value = normalized.image_max_body_bytes / MiB;
     displayedImageMode = normalized.image_resize_mode;
     elements.image_resize_mode.value = displayedImageMode;
     elements.image_jpeg_quality.value = normalized.image_jpeg_quality;
@@ -136,7 +139,7 @@
     if (!elements['config-form'].reportValidity()) return null;
     var config = formConfig();
     var numericKeys = ['min_body_bytes', 'max_body_bytes', 'max_in_flight', 'response_header_timeout_seconds',
-      'image_jpeg_quality', 'image_min_savings_bytes'];
+      'image_max_body_bytes', 'image_jpeg_quality', 'image_min_savings_bytes'];
     for (var i = 0; i < numericKeys.length; i++) {
       if (!Number.isSafeInteger(config[numericKeys[i]])) {
         notice('数值设置需要填写有效整数。', 'error');
