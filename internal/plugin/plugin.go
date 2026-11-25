@@ -299,7 +299,11 @@ func (p *Plugin) RoundTrip(req *http.Request, meta *sdk.RequestMeta) (*http.Resp
 	encoded := strings.TrimSpace(strings.Join(r.Header.Values("Content-Encoding"), ",")) != ""
 	hasBody := r.Body != nil && r.Body != http.NoBody
 	zstdEligible := false
-	imageEligible := c.ImageEnabled && target && !encoded && hasBody && r.ContentLength <= maxImageBodyBytes
+	imageEligible := c.ImageEnabled && target && !encoded && hasBody
+	if imageEligible && bodyExceedsLimit(r.ContentLength, c.ImageMaxBodyBytes) {
+		p.images.stats.skip("request_limit")
+		imageEligible = false
+	}
 	switch {
 	case !c.CompressionEnabled:
 		p.stats.disabled.Add(1)
@@ -311,13 +315,10 @@ func (p *Plugin) RoundTrip(req *http.Request, meta *sdk.RequestMeta) (*http.Resp
 		p.stats.cooldown.Add(1)
 	case !hasBody || (r.ContentLength > 0 && r.ContentLength < c.MinBodyBytes):
 		p.stats.small.Add(1)
-	case c.MaxBodyBytes > 0 && r.ContentLength > c.MaxBodyBytes:
+	case bodyExceedsLimit(r.ContentLength, c.MaxBodyBytes):
 		p.stats.large.Add(1)
 	default:
 		zstdEligible = true
-	}
-	if c.ImageEnabled && target && !encoded && r.ContentLength > maxImageBodyBytes {
-		p.images.stats.skip("request_limit")
 	}
 	if imageEligible || zstdEligible {
 		unreserve, reserveErr := p.reserve(r.Context())
@@ -348,11 +349,13 @@ func (p *Plugin) RoundTrip(req *http.Request, meta *sdk.RequestMeta) (*http.Resp
 			if prepared.usedDisk {
 				p.stats.diskRequests.Add(1)
 			}
-			if imageEligible && prepared.raw.size > maxImageBodyBytes {
+			if imageEligible && bodyExceedsLimit(prepared.raw.size, c.ImageMaxBodyBytes) {
 				p.images.stats.skip("request_limit")
 			}
 			if prepared.overLimit {
-				p.stats.large.Add(1)
+				if zstdEligible {
+					p.stats.large.Add(1)
+				}
 				r.Body = &combinedBody{Reader: io.MultiReader(prepared.raw.reader(), src), closer: src}
 				r.ContentLength = -1
 				r.Header.Del("Content-Length")
@@ -371,7 +374,7 @@ func (p *Plugin) RoundTrip(req *http.Request, meta *sdk.RequestMeta) (*http.Resp
 					switch {
 					case prepared.raw.size < c.MinBodyBytes:
 						p.stats.small.Add(1)
-					case c.MaxBodyBytes > 0 && prepared.raw.size > c.MaxBodyBytes:
+					case bodyExceedsLimit(prepared.raw.size, c.MaxBodyBytes):
 						p.stats.large.Add(1)
 					default:
 						p.stats.noGain.Add(1)

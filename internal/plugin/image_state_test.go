@@ -200,6 +200,50 @@ func TestImageCoordinateOutputKeepsOriginal(t *testing.T) {
 	}
 }
 
+func TestImageReplacementStatus(t *testing.T) {
+	optimizer := newImageOptimizer()
+	snapshot := func() map[string]json.RawMessage {
+		t.Helper()
+		data, err := json.Marshal(optimizer.status())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stats map[string]json.RawMessage
+		if err := json.Unmarshal(data, &stats); err != nil {
+			t.Fatal(err)
+		}
+		return stats
+	}
+
+	optimizer.stats.recordReplacements(nil, 100*time.Millisecond)
+	empty := snapshot()
+	for _, key := range []string{"average_processing_milliseconds", "saving_percent"} {
+		if got := string(empty[key]); got != "null" {
+			t.Errorf("without a replacement %s = %q, want null", key, got)
+		}
+	}
+
+	optimizer.stats.recordReplacements([]proposedImageEdit{
+		{sourceBytes: 1200, jpegBytes: 600},
+		{sourceBytes: 600, jpegBytes: 60},
+	}, 3500*time.Microsecond)
+	optimizer.stats.recordReplacements([]proposedImageEdit{
+		{sourceBytes: 2200, jpegBytes: 940},
+	}, 7500*time.Microsecond)
+	stats := snapshot()
+	for key, want := range map[string]string{
+		"average_processing_milliseconds": "5.5",
+		"saving_percent":                  "60",
+		"replaced":                        "3",
+		"source_image_bytes":              "4000",
+		"jpeg_image_bytes":                "1600",
+	} {
+		if got := string(stats[key]); got != want {
+			t.Errorf("%s = %q, want %s", key, got, want)
+		}
+	}
+}
+
 func TestImageBandwidthProbe(t *testing.T) {
 	if os.Getenv("SUB2API_IMAGE_BENCH") != "1" {
 		t.Skip("set SUB2API_IMAGE_BENCH=1 to run the screenshot size probe")

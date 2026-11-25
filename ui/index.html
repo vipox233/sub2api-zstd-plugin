@@ -17,7 +17,7 @@
         <h1>OpenAI 上游请求压缩</h1>
         <p class="subtitle">优化内联截图和请求体，减少上传到 Codex 上游的数据量。</p>
       </div>
-      <span class="codec">v1.3.0 · JPEG / zstd</span>
+      <span class="codec">v1.4.0 · JPEG / zstd</span>
     </header>
 
     <div id="notice" class="notice" role="status" aria-live="polite">正在读取已保存配置…</div>
@@ -56,17 +56,12 @@
             <label class="field" for="max_body_mib">
               <span>最大压缩请求体 <span class="unit">MiB</span></span>
               <input id="max_body_mib" type="number" value="512" min="0" step="any" inputmode="decimal" required>
-              <small>可填 512、1024 或自定义数值；0 = 不限。仅超过非零上限时原样转发。</small>
+              <small>填 0 表示不限。超过此值的请求跳过 zstd。</small>
             </label>
             <label class="field" for="max_in_flight">
               <span>同时压缩的请求上限</span>
-              <select id="max_in_flight">
-                <option value="1">1</option>
-                <option value="2" selected>2（默认）</option>
-                <option value="3">3</option>
-                <option value="4">4</option>
-              </select>
-              <small>达到上限时排队等待，不因并发满而发送原文；客户端取消时终止等待。</small>
+              <input id="max_in_flight" type="number" value="2" min="1" step="1" inputmode="numeric" required>
+              <small>填写正整数。达到上限时，后续请求排队。</small>
             </label>
             <label class="field" for="response_header_timeout_seconds">
               <span>等待上游响应头 <span class="unit">秒</span></span>
@@ -95,6 +90,11 @@
             <span><strong id="image-title">启用图片优化</strong><small>将符合条件的 JPEG 和静态不透明 PNG 重编码为 JPEG，再压缩请求体。</small></span>
           </label>
           <div class="field-grid">
+            <label class="field" for="image_max_body_mib">
+              <span>最大换图请求体 <span class="unit">MiB</span></span>
+              <input id="image_max_body_mib" type="number" value="64" min="0" step="any" inputmode="decimal" required>
+              <small>按整个出站请求体计算。填 0 表示不限。超过此值的请求跳过换图。</small>
+            </label>
             <label class="field" for="image_resize_mode">
               <span>尺寸档位</span>
               <select id="image_resize_mode">
@@ -149,12 +149,13 @@
       <div class="stats-grid">
         <div class="stat"><span>原始请求体</span><strong id="stat-image-before">—</strong></div>
         <div class="stat"><span>换图后</span><strong id="stat-image-after">—</strong></div>
+        <div class="stat"><span>换图节省比例</span><strong id="stat-image-saved">—</strong></div>
         <div class="stat"><span>预计发送体积</span><strong id="stat-image-wire">—</strong></div>
         <div class="stat"><span>图片缓存命中率</span><strong id="stat-image-hit">—</strong></div>
         <div class="stat"><span>替换次数</span><strong id="stat-image-replaced">—</strong></div>
-        <div class="stat"><span>累计处理耗时</span><strong id="stat-image-time">—</strong></div>
+        <div class="stat"><span>平均换图耗时</span><strong id="stat-image-time">—</strong></div>
       </div>
-      <p class="hint">体积仅计入发生换图的请求。详细统计包含跳过原因、缓存容量和历史图片回退次数。</p>
+      <p class="hint">节省比例按已替换图片的文件体积计算。请求体积和平均耗时只统计发生换图的请求。</p>
     </section>
 
     <footer>

@@ -13,8 +13,10 @@ const (
 	imageFit1080           = "fit1080"
 	imageFit1440           = "fit1440"
 	imageOriginal          = "original"
+	defaultImageMaxBody    = 64 << 20
 	defaultImageMinSavings = 32 << 10
 	legacyImageJPEGQuality = 92
+	maxConfigInteger       = 1<<53 - 1 // Exact JSON integer in the browser UI.
 )
 
 // Config contains no credentials; the host supplies each account's proxy.
@@ -27,6 +29,7 @@ type Config struct {
 	ResponseHeaderTimeoutSeconds int64  `json:"response_header_timeout_seconds"`
 	ProxyMode                    string `json:"proxy_mode"`
 	ImageEnabled                 bool   `json:"image_enabled"`
+	ImageMaxBodyBytes            int64  `json:"image_max_body_bytes"`
 	ImageResizeMode              string `json:"image_resize_mode"`
 	ImageJPEGQuality             int    `json:"image_jpeg_quality"`
 	ImageMinSavingsBytes         int    `json:"image_min_savings_bytes"`
@@ -37,7 +40,8 @@ func DefaultConfig() Config {
 	return Config{
 		CompressionEnabled: true, MinBodyBytes: 1024, MaxBodyBytes: 512 << 20,
 		MaxInFlight: 2, FallbackOn415: true, ResponseHeaderTimeoutSeconds: 600, ProxyMode: "account",
-		ImageResizeMode: imageFit1080, ImageJPEGQuality: presetImageQuality(imageFit1080),
+		ImageMaxBodyBytes: defaultImageMaxBody,
+		ImageResizeMode:   imageFit1080, ImageJPEGQuality: presetImageQuality(imageFit1080),
 		ImageMinSavingsBytes: defaultImageMinSavings,
 	}
 }
@@ -100,19 +104,20 @@ func DecodeConfig(raw []byte) (Config, error) {
 	if c.MinBodyBytes < 1 || c.MinBodyBytes > 1<<20 {
 		return Config{}, errors.New("min_body_bytes 必须在 1–1048576 之间")
 	}
-	// Zero disables this plugin's size cutoff. Use the largest exactly
-	// representable JSON/JavaScript integer rather than an artificial MiB cap.
-	if c.MaxBodyBytes < 0 || c.MaxBodyBytes > 9007199254740991 || (c.MaxBodyBytes > 0 && (c.MaxBodyBytes < 1024 || c.MinBodyBytes > c.MaxBodyBytes)) {
+	if c.MaxBodyBytes < 0 || c.MaxBodyBytes > maxConfigInteger || (c.MaxBodyBytes > 0 && (c.MaxBodyBytes < 1024 || c.MinBodyBytes > c.MaxBodyBytes)) {
 		return Config{}, errors.New("max_body_bytes must be 0 (unlimited) or 1024..9007199254740991, and not below min_body_bytes")
 	}
-	if c.MaxInFlight < 1 || c.MaxInFlight > 4 {
-		return Config{}, errors.New("max_in_flight must be 1..4; there is no aggregate body-size budget")
+	if c.MaxInFlight < 1 || c.MaxInFlight > maxConfigInteger {
+		return Config{}, errors.New("max_in_flight 必须是 1–9007199254740991 的整数")
 	}
 	if c.ResponseHeaderTimeoutSeconds < 30 || c.ResponseHeaderTimeoutSeconds > 1800 {
 		return Config{}, errors.New("响应头超时必须在 30–1800 秒之间")
 	}
 	if c.ProxyMode != "account" && c.ProxyMode != "direct" {
 		return Config{}, errors.New("proxy_mode 只能为 account 或 direct")
+	}
+	if c.ImageMaxBodyBytes < 0 || c.ImageMaxBodyBytes > maxConfigInteger {
+		return Config{}, errors.New("image_max_body_bytes 必须是 0–9007199254740991 的整数")
 	}
 	if c.ImageJPEGQuality < 1 || c.ImageJPEGQuality > 100 {
 		return Config{}, errors.New("image_jpeg_quality 必须在 1–100 之间")

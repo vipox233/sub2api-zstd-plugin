@@ -208,6 +208,52 @@ func TestImageRewritePreservesRawJSONAndHistory(t *testing.T) {
 	}
 }
 
+func TestUnknownLengthBodyRespectsIndependentImageAndZstdLimits(t *testing.T) {
+	_, original := imageTestSource(t)
+	body := imageTestTurn(imageTestUser(original, "auto"))
+	size := int64(len(body))
+	for _, tc := range []struct {
+		name                      string
+		zstdLimit, imageLimit     int64
+		wantEncoding              string
+		wantJPEG, wantPassThrough bool
+	}{
+		{"at both limits", size, size, "zstd", true, false},
+		{"only image fits", size - 1, size, "", true, false},
+		{"only zstd fits", size, size - 1, "zstd", false, false},
+		{"unlimited image", size - 1, 0, "", true, false},
+		{"unlimited zstd", 0, size - 1, "zstd", false, false},
+		{"over both limits", size / 2, size / 2, "", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := imageTestPlugin(t, map[string]any{"max_body_bytes": tc.zstdLimit, "image_max_body_bytes": tc.imageLimit})
+			req := imageTestRequest(t, body)
+			meta := oauthMeta(body)
+			req.ContentLength = -1
+			meta.ContentLength = -1
+			var got capture
+			p.roundTripOverride = captureTransport(t, &got)
+			resp, err := p.RoundTrip(req, meta)
+			closeResponse(t, resp, err)
+			if tc.wantPassThrough {
+				if got.length != -1 || got.headers.Get("Content-Encoding") != "" || !bytes.Equal(got.body, body) {
+					t.Fatal("oversize request did not stream its exact original body")
+				}
+				return
+			}
+			selected := imageTestUnpack(t, got, tc.wantEncoding)
+			want := body
+			if tc.wantJPEG {
+				replacement := imageTestReadJPEG(t, selected, imageTestWidth, imageTestHeight)
+				want = imageTestTurn(imageTestUser(replacement, "auto"))
+			}
+			if !bytes.Equal(selected, want) {
+				t.Fatal("request changed outside the eligible image URL")
+			}
+		})
+	}
+}
+
 func TestImageRewriteKeepsUnknownHistoryAndMalformattedImages(t *testing.T) {
 	raw, original := imageTestSource(t)
 	truncated := imageTestPNG + base64.StdEncoding.EncodeToString(raw[:len(raw)-12])
