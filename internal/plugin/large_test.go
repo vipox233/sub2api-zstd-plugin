@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -14,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -44,58 +44,66 @@ func finishResult(t *testing.T, done <-chan error) {
 	}
 }
 
+type pausedRequestBody struct {
+	io.Reader
+	started, resume chan struct{}
+	firstRead       sync.Once
+}
+
+func (b *pausedRequestBody) Read(p []byte) (int, error) {
+	b.firstRead.Do(func() { close(b.started) })
+	<-b.resume
+	return b.Reader.Read(p)
+}
+
+func (b *pausedRequestBody) Close() error { return nil }
+
+func forwardRequest(p *Plugin, req *http.Request, body []byte) error {
+	meta := oauthMeta(body)
+	meta.ContentLength = req.ContentLength
+	resp, err := p.RoundTrip(req, meta)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	return err
+}
+
 func TestConcurrentCapacitySurvivesConfigReload(t *testing.T) {
-	p := testPlugin(t, map[string]any{"max_in_flight": 1})
-	body := requestFixture(20)
-	entered, unblock := make(chan struct{}), make(chan struct{})
-	defer func() {
-		select {
-		case <-unblock:
-		default:
-			close(unblock)
-		}
-	}()
+	p := testPlugin(t, map[string]any{"max_in_flight": 1, "max_body_bytes": 4 << 20})
+	body := requestFixture(4000)
+	src := &pausedRequestBody{Reader: bytes.NewReader(body), started: make(chan struct{}), resume: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(src.resume) })
+	defer release()
+	firstReq, secondReq := testRequest(t, officialURL, body), testRequest(t, officialURL, body)
+	firstReq.Body = src
 	var calls atomic.Int32
 	p.roundTripOverride = func(r *http.Request, _ string) (*http.Response, error) {
+		calls.Add(1)
+		defer r.Body.Close()
 		if r.Header.Get("Content-Encoding") != "zstd" {
 			return nil, fmt.Errorf("queued request bypassed compression")
 		}
 		_, err := io.Copy(io.Discard, r.Body)
-		_ = r.Body.Close()
-		if err != nil {
-			return nil, err
-		}
-		if calls.Add(1) == 1 {
-			close(entered)
-			<-unblock
-		}
-		return response(200, []byte("ok")), nil
-	}
-	call := func(done chan error) {
-		r, e := p.RoundTrip(testRequest(t, officialURL, body), oauthMeta(body))
-		if r != nil {
-			_ = r.Body.Close()
-		}
-		done <- e
+		return response(200, nil), err
 	}
 	first, second := make(chan error, 1), make(chan error, 1)
-	go call(first)
+	go func() { first <- forwardRequest(p, firstReq, body) }()
 	select {
-	case <-entered:
+	case <-src.started:
 	case <-time.After(3 * time.Second):
-		t.Fatal("first did not enter")
+		t.Fatal("first request did not reach body preparation")
 	}
-	go call(second)
+	go func() { second <- forwardRequest(p, secondReq, body) }()
 	awaitWaiting(t, p)
-	// Force a real state replacement, not an idempotent no-op.
-	err := p.ApplyConfig(context.Background(), []byte(`{"min_body_bytes":1,"max_body_bytes":4096,"max_in_flight":1,"response_header_timeout_seconds":601}`))
+	// A fresh configuration must share the same global preparation budget.
+	err := p.ApplyConfig(context.Background(), []byte(`{"min_body_bytes":1,"max_body_bytes":4194304,"max_in_flight":1,"response_header_timeout_seconds":601}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls.Load() != 1 || p.inFlight.Load() != 1 {
-		t.Fatal("reload reset global concurrency budget")
+	if calls.Load() != 0 || p.inFlight.Load() != 1 {
+		t.Fatal("reload reset global preparation capacity")
 	}
-	close(unblock)
+	release()
 	finishResult(t, first)
 	finishResult(t, second)
 	if calls.Load() != 2 || p.inFlight.Load() != 0 || p.waiting.Load() != 0 {
@@ -103,47 +111,106 @@ func TestConcurrentCapacitySurvivesConfigReload(t *testing.T) {
 	}
 }
 
-func TestEarlyResponseKeepsBodyBudgetUntilUploadCloses(t *testing.T) {
-	p := testPlugin(t, map[string]any{"max_in_flight": 1})
-	body := requestFixture(20)
-	var pending *http.Request
+func TestSlowUpstreamDoesNotBlockOtherPreparations(t *testing.T) {
+	p := testPlugin(t, map[string]any{"max_in_flight": 1, "max_body_bytes": 4 << 20})
+	body := requestFixture(4000)
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(unblock) })
+	defer release()
 	var calls atomic.Int32
 	p.roundTripOverride = func(r *http.Request, _ string) (*http.Response, error) {
+		defer r.Body.Close()
 		if r.Header.Get("Content-Encoding") != "zstd" {
-			return nil, fmt.Errorf("raw upload under contention")
+			return nil, fmt.Errorf("request bypassed compression")
 		}
 		if calls.Add(1) == 1 {
-			pending = r
-			return response(200, []byte("ok")), nil
+			close(entered)
+			<-unblock
 		}
 		_, err := io.Copy(io.Discard, r.Body)
-		_ = r.Body.Close()
 		return response(200, nil), err
 	}
-	r, err := p.RoundTrip(testRequest(t, officialURL, body), oauthMeta(body))
-	closeResponse(t, r, err)
-	defer pending.Body.Close()
-	done := make(chan error, 1)
-	go func() {
-		r, e := p.RoundTrip(testRequest(t, officialURL, body), oauthMeta(body))
-		if r != nil {
-			_ = r.Body.Close()
-		}
-		done <- e
-	}()
-	awaitWaiting(t, p)
-	if calls.Load() != 1 {
-		t.Fatal("reservation released before upload close")
+	firstReq := testRequest(t, officialURL, body)
+	secondReq := testRequest(t, officialURL, body)
+	first, second := make(chan error, 1), make(chan error, 1)
+	go func() { first <- forwardRequest(p, firstReq, body) }()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first request did not reach slow upstream")
 	}
-	_ = pending.Body.Close()
-	finishResult(t, done)
-	if p.inFlight.Load() != 0 {
-		t.Fatal("upload lease leaked")
+	go func() { second <- forwardRequest(p, secondReq, body) }()
+	finishResult(t, second)
+	if calls.Load() != 2 || p.inFlight.Load() != 0 || p.waiting.Load() != 0 {
+		t.Fatal("slow upstream occupied a preparation slot")
+	}
+	release()
+	finishResult(t, first)
+}
+
+func TestSmallTextDoesNotWaitForLargePreparation(t *testing.T) {
+	p := testPlugin(t, map[string]any{"max_in_flight": 1, "max_body_bytes": 4 << 20, "min_body_bytes": 1024, "image_enabled": true})
+	release, err := p.reserve(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	for _, tt := range []struct {
+		name, encoding string
+		body           []byte
+	}{
+		{"below compression threshold", "", requestFixture(1)},
+		{"lightweight compressible text", "zstd", requestFixture(70)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var got capture
+			p.roundTripOverride = captureTransport(t, &got)
+			req := testRequest(t, officialURL, tt.body)
+			done := make(chan error, 1)
+			go func() { done <- forwardRequest(p, req, tt.body) }()
+			finishResult(t, done)
+			if selected := imageTestUnpack(t, got, tt.encoding); !bytes.Equal(selected, tt.body) {
+				t.Fatal("small text request body changed")
+			}
+		})
+	}
+}
+
+func TestEarlyResponseKeepsBodyAvailableForAsyncReader(t *testing.T) {
+	p := testPlugin(t, map[string]any{"compression_enabled": false, "image_enabled": true})
+	size := int64(spoolMemoryBytes + 1)
+	req := testRequest(t, officialURL, nil)
+	req.Body = io.NopCloser(syntheticBody(size))
+	req.ContentLength = size
+	var pending io.ReadCloser
+	p.roundTripOverride = func(r *http.Request, _ string) (*http.Response, error) {
+		pending = r.Body
+		return response(200, nil), nil
+	}
+	if err := forwardRequest(p, req, []byte("present")); err != nil {
+		t.Fatal(err)
+	}
+	if pending == nil {
+		t.Fatal("request body missing")
+	}
+	defer pending.Close()
+	if p.inFlight.Load() != 0 || p.stats.diskRequests.Load() != 1 {
+		t.Fatal("early response retained its preparation slot or did not spool to disk")
+	}
+	// An asynchronous sender may still read the spooled body after RoundTrip
+	// returns. Independent cursors and the reader's lease must keep it alive.
+	expected, actual := sha256.New(), sha256.New()
+	if _, err := io.Copy(expected, syntheticBody(size)); err != nil {
+		t.Fatal(err)
+	}
+	n, err := io.Copy(actual, pending)
+	if err != nil || n != size || !bytes.Equal(actual.Sum(nil), expected.Sum(nil)) {
+		t.Fatalf("asynchronous body read: bytes=%d err=%v", n, err)
 	}
 }
 
 func TestQueueCancellationDoesNotSendRawRequest(t *testing.T) {
-	p := testPlugin(t, map[string]any{"max_in_flight": 1})
+	p := testPlugin(t, map[string]any{"max_in_flight": 1, "max_body_bytes": 4 << 20})
 	release, err := p.reserve(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +218,7 @@ func TestQueueCancellationDoesNotSendRawRequest(t *testing.T) {
 	defer release()
 	var calls int
 	p.roundTripOverride = countOnlyTransport(&calls)
-	body := requestFixture(20)
+	body := requestFixture(4000)
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
 	_, err = p.RoundTrip(testRequest(t, officialURL, body).WithContext(ctx), oauthMeta(body))
@@ -182,11 +249,12 @@ func TestCloseWakesQueuedRequests(t *testing.T) {
 }
 
 func TestDiskSpoolingAndLarge415Fallback(t *testing.T) {
-	raw := make([]byte, 2<<20)
+	raw := make([]byte, spoolMemoryBytes)
 	_, _ = rand.New(rand.NewSource(9)).Read(raw)
-	body, _ := json.Marshal(map[string]string{"input": base64.StdEncoding.EncodeToString(raw)})
+	body := base64.StdEncoding.AppendEncode([]byte(`{"input":"`), raw)
+	body = append(body, '"', '}')
 	expected := sha256.Sum256(body)
-	p := testPlugin(t, map[string]any{"max_body_bytes": 4 << 20})
+	p := testPlugin(t, map[string]any{"max_body_bytes": 2 * spoolMemoryBytes})
 	calls := 0
 	p.roundTripOverride = func(r *http.Request, _ string) (resp *http.Response, err error) {
 		defer func() {
@@ -233,7 +301,8 @@ func TestDiskSpoolingAndLarge415Fallback(t *testing.T) {
 func TestSpoolIsAnonymousAndReleased(t *testing.T) {
 	var s spool
 	block := bytes.Repeat([]byte("0123456789abcdef"), 1<<16)
-	for i := 0; i < 3; i++ {
+	blocks := spoolMemoryBytes/len(block) + 1
+	for range blocks {
 		if _, e := s.Write(block); e != nil {
 			t.Fatal(e)
 		}
@@ -247,7 +316,7 @@ func TestSpoolIsAnonymousAndReleased(t *testing.T) {
 	f := s.file
 	for i := 0; i < 2; i++ {
 		n, e := io.Copy(io.Discard, s.reader())
-		if e != nil || n != 3*int64(len(block)) {
+		if e != nil || n != int64(blocks*len(block)) {
 			t.Fatal("independent reader mismatch")
 		}
 	}
@@ -259,11 +328,13 @@ func TestSpoolIsAnonymousAndReleased(t *testing.T) {
 
 func TestStorageFailureDoesNotUploadRaw(t *testing.T) {
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
-	p := testPlugin(t, map[string]any{"max_body_bytes": 4 << 20})
+	p := testPlugin(t, map[string]any{"max_body_bytes": 2 * spoolMemoryBytes})
 	calls := 0
 	p.roundTripOverride = countOnlyTransport(&calls)
-	body := bytes.Repeat([]byte("a"), 2<<20)
-	_, err := p.RoundTrip(testRequest(t, officialURL, body), oauthMeta(body))
+	req := testRequest(t, officialURL, nil)
+	req.ContentLength = spoolMemoryBytes + 1
+	req.Body = io.NopCloser(syntheticBody(req.ContentLength))
+	err := forwardRequest(p, req, []byte("present"))
 	if err == nil || calls != 0 || p.inFlight.Load() != 0 {
 		t.Fatal("storage failure bypassed compression or leaked reservation")
 	}
@@ -367,17 +438,150 @@ func TestLarge512MiBAndUnlimited(t *testing.T) {
 }
 
 func TestIncompressibleDiskBodyPassesThroughExactly(t *testing.T) {
-	body := make([]byte, 2<<20)
+	body := make([]byte, spoolMemoryBytes+1)
 	_, _ = rand.New(rand.NewSource(37)).Read(body)
-	p := testPlugin(t, map[string]any{"max_body_bytes": 4 << 20})
-	var got capture
-	p.roundTripOverride = captureTransport(t, &got)
+	expected := sha256.Sum256(body)
+	p := testPlugin(t, map[string]any{"max_body_bytes": 2 * spoolMemoryBytes})
+	p.roundTripOverride = func(r *http.Request, _ string) (*http.Response, error) {
+		encoding := r.Header.Get("Content-Encoding")
+		if encoding != "" || r.ContentLength != int64(len(body)) {
+			t.Errorf("no-gain body changed metadata: encoding=%q length=%d", encoding, r.ContentLength)
+		}
+		defer r.Body.Close()
+		actual := sha256.New()
+		_, err := io.Copy(actual, r.Body)
+		if !bytes.Equal(actual.Sum(nil), expected[:]) {
+			t.Error("no-gain body changed bytes")
+		}
+		return response(200, nil), err
+	}
 	r, err := p.RoundTrip(testRequest(t, officialURL, body), oauthMeta(body))
 	closeResponse(t, r, err)
-	if got.headers.Get("Content-Encoding") != "" || !bytes.Equal(got.body, body) {
-		t.Fatal("no-gain body changed")
+	if p.stats.noGain.Load() != 1 || p.stats.diskRequests.Load() != 1 || p.inFlight.Load() != 0 {
+		t.Fatal("no-gain spooling or cleanup failed")
 	}
-	if p.stats.noGain.Load() != 1 || p.inFlight.Load() != 0 {
-		t.Fatal("no-gain decision or cleanup failed")
+}
+
+func TestImageRewriteOnRequestLargerThan64MiB(t *testing.T) {
+	const paddingBytes = 65 << 20
+	padded := func(body []byte) (io.Reader, int64) {
+		// Keep the large non-image value outside input. A streaming fixture
+		// exercises the real scanner and spill path with little extra heap.
+		const key, tail = ",\n  \"padding\": \"", "\"\n}\n"
+		prefix := body[:len(body)-2]
+		reader := io.MultiReader(bytes.NewReader(prefix), strings.NewReader(key),
+			io.LimitReader(&patternReader{}, paddingBytes), strings.NewReader(tail))
+		return reader, int64(len(prefix) + len(key) + paddingBytes + len(tail))
+	}
+	_, source := imageTestSource(t)
+	body := imageTestTurn(imageTestUser(source, "auto"))
+	reference := imageTestPlugin(t, map[string]any{"compression_enabled": false})
+	selected := imageTestUnpack(t, imageTestSend(t, reference, body), "")
+	imageTestReadJPEG(t, selected, imageTestWidth, imageTestHeight)
+	expected := sha256.New()
+	expectedBody, expectedLength := padded(selected)
+	if _, err := io.Copy(expected, expectedBody); err != nil {
+		t.Fatal(err)
+	}
+
+	p := imageTestPlugin(t, map[string]any{"max_body_bytes": 128 << 20})
+	src, size := padded(body)
+	req := testRequest(t, officialURL, nil)
+	req.Body = io.NopCloser(src)
+	req.ContentLength = size
+	p.roundTripOverride = func(r *http.Request, _ string) (*http.Response, error) {
+		defer r.Body.Close()
+		if r.Header.Get("Content-Encoding") != "zstd" || r.ContentLength >= size {
+			return nil, fmt.Errorf("large request was not compressed")
+		}
+		decoded, err := zstd.NewReader(r.Body, zstd.WithDecoderConcurrency(1))
+		if err != nil {
+			return nil, err
+		}
+		defer decoded.Close()
+		actual := sha256.New()
+		n, err := io.Copy(actual, decoded)
+		if n != expectedLength || !bytes.Equal(actual.Sum(nil), expected.Sum(nil)) {
+			t.Errorf("large rewrite kept the original image or changed unrelated bytes: length=%d, want %d", n, expectedLength)
+		}
+		return response(200, nil), err
+	}
+	if err := forwardRequest(p, req, []byte("present")); err != nil {
+		t.Fatal(err)
+	}
+	if p.stats.diskRequests.Load() != 1 {
+		t.Fatal("oversized request did not exercise disk spooling")
+	}
+}
+
+func TestZstdWindowFollowsConfigReload(t *testing.T) {
+	const size = 9 << 20
+	const maxBody = 16 << 20
+	p := testPlugin(t, map[string]any{"max_body_bytes": maxBody, "zstd_window_mib": 1})
+	window := func() uint64 {
+		t.Helper()
+		var got capture
+		p.roundTripOverride = captureTransport(t, &got)
+		req := testRequest(t, officialURL, nil)
+		req.Body = io.NopCloser(syntheticBody(size))
+		req.ContentLength = size
+		if err := forwardRequest(p, req, []byte("present")); err != nil {
+			t.Fatal(err)
+		}
+		var header zstd.Header
+		if reqEncoding := got.headers.Get("Content-Encoding"); reqEncoding != "zstd" {
+			t.Fatalf("request encoding %q, want zstd", reqEncoding)
+		}
+		if err := header.Decode(got.body); err != nil {
+			t.Fatalf("invalid zstd frame: %v", err)
+		}
+		return header.WindowSize
+	}
+	if got := window(); got != 1<<20 {
+		t.Fatalf("initial zstd window %d, want 1 MiB", got)
+	}
+	raw := []byte(`{"max_body_bytes":16777216,"zstd_level":9,"zstd_window_mib":8}`)
+	if err := p.ApplyConfig(t.Context(), raw); err != nil {
+		t.Fatal(err)
+	}
+	if got := window(); got != 8<<20 {
+		t.Fatalf("zstd window after reload %d, want 8 MiB", got)
+	}
+}
+
+func TestImageReplacementSpoolCanExceed16MiB(t *testing.T) {
+	b := &preparedBody{}
+	defer b.close()
+	original := `{"input":["a","b"]}`
+	if _, err := b.raw.WriteString(original); err != nil {
+		t.Fatal(err)
+	}
+	first, second := strings.Repeat("A", 9<<20), strings.Repeat("B", 9<<20)
+	// Encode completions arrived out of order. Each edit retains its own
+	// replacement offset, independent of the order in which JSON is patched.
+	for _, replacement := range []string{second, first} {
+		if _, err := b.replacements.WriteString(replacement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if b.replacements.file == nil {
+		t.Fatal("large replacements must spill to disk")
+	}
+	firstStart, secondStart := strings.Index(original, "a"), strings.Index(original, "b")
+	b.edits = []imageEdit{
+		{start: int64(firstStart), end: int64(firstStart + 1), replacementStart: int64(len(second)), replacementEnd: b.replacements.size},
+		{start: int64(secondStart), end: int64(secondStart + 1), replacementEnd: int64(len(second))},
+	}
+	b.sizeDelta = int64(len(first) + len(second) - 2)
+	got, want := sha256.New(), sha256.New()
+	written, err := io.Copy(got, b.selectedReader())
+	if err != nil || written != b.selectedSize() {
+		t.Fatalf("wrote %d of %d bytes: %v", written, b.selectedSize(), err)
+	}
+	for _, part := range []string{original[:firstStart], first, original[firstStart+1 : secondStart], second, original[secondStart+1:]} {
+		_, _ = io.WriteString(want, part)
+	}
+	if !bytes.Equal(got.Sum(nil), want.Sum(nil)) {
+		t.Fatal("replacement offsets changed the selected JSON")
 	}
 }

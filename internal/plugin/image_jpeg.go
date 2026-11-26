@@ -8,8 +8,8 @@ import (
 	"image/color"
 )
 
-// Follow JPEG markers through all scans to require a single complete image.
-// Otherwise the still decoder can silently drop appended frames or video.
+// Follow markers through the primary JPEG. Modern phone photos may contain
+// MPF metadata and additional data after the primary image.
 func stillJPEGOrientation(ctx context.Context, data []byte) (int, bool) {
 	if len(data) < 4 || data[0] != 0xff || data[1] != 0xd8 {
 		return 0, false
@@ -39,7 +39,7 @@ func stillJPEGOrientation(ctx context.Context, data []byte) (int, bool) {
 		offset++
 		switch {
 		case marker == 0xd9:
-			return orientation, sawScan && offset == len(data)
+			return orientation, sawScan
 		case marker == 0xd8:
 			return 0, false
 		case marker == 0 || (marker >= 0xd0 && marker <= 0xd7):
@@ -66,8 +66,6 @@ func stillJPEGOrientation(ctx context.Context, data []byte) (int, bool) {
 			}
 			sawFrame = true
 		case marker == 0xda && !sawFrame:
-			return 0, false
-		case marker == 0xe2 && bytes.HasPrefix(segment, []byte("MPF\x00")):
 			return 0, false
 		case marker == 0xe1 && bytes.HasPrefix(segment, []byte("Exif\x00\x00")):
 			if sawExif {
@@ -126,12 +124,12 @@ func exifOrientation(tiff []byte) int {
 
 // Map pixels to the displayed orientation without making a second full-size
 // copy. The output JPEG has the orientation applied directly to its pixels.
-type orientedJPEG struct {
+type orientedImage struct {
 	image.Image
 	orientation int
 }
 
-func (j orientedJPEG) Bounds() image.Rectangle {
+func (j orientedImage) Bounds() image.Rectangle {
 	b := j.Image.Bounds()
 	if j.orientation >= 5 {
 		return image.Rect(0, 0, b.Dy(), b.Dx())
@@ -139,7 +137,11 @@ func (j orientedJPEG) Bounds() image.Rectangle {
 	return image.Rect(0, 0, b.Dx(), b.Dy())
 }
 
-func (j orientedJPEG) At(x, y int) color.Color {
+func (j orientedImage) At(x, y int) color.Color {
+	return j.Image.At(j.sourcePoint(x, y))
+}
+
+func (j orientedImage) sourcePoint(x, y int) (int, int) {
 	b := j.Image.Bounds()
 	w, h := b.Dx(), b.Dy()
 	switch j.orientation {
@@ -158,5 +160,5 @@ func (j orientedJPEG) At(x, y int) color.Color {
 	case 8:
 		x, y = w-1-y, x
 	}
-	return j.Image.At(x+b.Min.X, y+b.Min.Y)
+	return x + b.Min.X, y + b.Min.Y
 }

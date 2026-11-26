@@ -6,3 +6,12 @@
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{transition:none!important}}
 
 .budget{margin-top:13px}.over-budget{color:var(--error)}.button.compact{padding:5px 10px;font-size:11px}
+
+.skip-summary { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 10px; }
+.skip-summary h3 { font-size: 13px; margin: 0; }
+.table-scroll { max-height: 380px; overflow: auto; }
+.table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.recent-table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+.recent-table th, .recent-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.recent-table th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; }
+.recent-table td small { display: block; color: var(--muted); }
