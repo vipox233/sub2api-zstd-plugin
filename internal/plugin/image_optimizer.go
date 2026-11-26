@@ -5,7 +5,6 @@ import (
 	"container/list"
 	"context"
 	"crypto/sha256"
-	"io"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -19,8 +18,8 @@ const (
 )
 
 type imageEdit struct {
-	start, end                       int64
-	replacementStart, replacementEnd int64
+	start, end int64
+	url        string
 }
 
 type imageCacheKey struct {
@@ -34,12 +33,19 @@ type cachedImage struct {
 	touched time.Time
 }
 
+type imageFlight struct {
+	done   chan struct{}
+	result imageResult
+	took   time.Duration
+	cached bool
+}
+
 type imageOptimizer struct {
 	mu      sync.Mutex
 	cache   map[imageCacheKey]*list.Element
 	recent  list.List
 	bytes   int
-	pending map[imageCacheKey]chan struct{}
+	pending map[imageCacheKey]*imageFlight
 
 	workerLimit   int
 	working       int
@@ -50,7 +56,7 @@ type imageOptimizer struct {
 
 func newImageOptimizer() *imageOptimizer {
 	return &imageOptimizer{
-		cache: make(map[imageCacheKey]*list.Element), pending: make(map[imageCacheKey]chan struct{}),
+		cache: make(map[imageCacheKey]*list.Element), pending: make(map[imageCacheKey]*imageFlight),
 		workerLimit: DefaultConfig().imageWorkerCount(), workerChanged: make(chan struct{}),
 	}
 }
@@ -108,9 +114,9 @@ func (o *imageOptimizer) releaseWorker() {
 	o.wakeWorkers()
 }
 
-// A cache miss has one owner across requests. If its budget expires, a waiter
-// with time left can retry with its own copy of the source.
-func (o *imageOptimizer) resolve(ctx context.Context, key imageCacheKey, src imageSource, size int) (imageResult, bool, time.Duration) {
+// Each waiter can leave independently. The shared encode has its own budget
+// and owns a pin on its input spool even if the initiating request leaves.
+func (o *imageOptimizer) resolve(ctx context.Context, key imageCacheKey, src imageSource, size int, budget time.Duration) (imageResult, bool, time.Duration) {
 	for ctx.Err() == nil {
 		o.mu.Lock()
 		now := time.Now()
@@ -123,36 +129,52 @@ func (o *imageOptimizer) resolve(ctx context.Context, key imageCacheKey, src ima
 			o.mu.Unlock()
 			return entry.result, true, 0
 		}
-		if pending := o.pending[key]; pending != nil {
-			o.mu.Unlock()
-			select {
-			case <-pending:
-				continue
-			case <-ctx.Done():
-				return imageResult{reason: "timeout"}, false, 0
-			}
+		flight, shared := o.pending[key]
+		if !shared {
+			flight = &imageFlight{done: make(chan struct{})}
+			o.pending[key] = flight
+			src.raw.pin()
+			go o.encodeFlight(key, flight, src, size, budget)
 		}
-		pending := make(chan struct{})
-		o.pending[key] = pending
 		o.mu.Unlock()
 
-		result, took := o.encode(ctx, key.profile, src, size)
-		o.mu.Lock()
-		switch result.reason {
-		case "", "no_gain", "format_or_limit", "invalid_png", "animated_png", "invalid_jpeg":
-			e := o.recent.PushFront(cachedImage{key: key, result: result, touched: time.Now()})
-			o.cache[key] = e
-			o.bytes += len(result.url)
-			for o.recent.Len() > imageCacheItems || o.bytes > imageCacheBytes {
-				o.removeCached(o.recent.Back())
+		select {
+		case <-ctx.Done():
+			return imageResult{reason: "timeout"}, false, 0
+		case <-flight.done:
+			if !shared {
+				return flight.result, false, flight.took
 			}
+			if flight.cached {
+				return flight.result, true, 0
+			}
+			// A joined flight can fail temporarily. Retry with this waiter's
+			// source if its own deadline leaves time for another flight.
 		}
-		delete(o.pending, key)
-		close(pending)
-		o.mu.Unlock()
-		return result, false, took
 	}
 	return imageResult{reason: "timeout"}, false, 0
+}
+
+func (o *imageOptimizer) encodeFlight(key imageCacheKey, flight *imageFlight, src imageSource, size int, budget time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	flight.result, flight.took = o.encode(ctx, key.profile, src, size)
+	cancel()
+	src.raw.unpin()
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	switch flight.result.reason {
+	case "", "no_gain", "format_or_limit", "invalid_png", "animated_png", "invalid_jpeg":
+		e := o.recent.PushFront(cachedImage{key: key, result: flight.result, touched: time.Now()})
+		o.cache[key] = e
+		o.bytes += len(flight.result.url)
+		for o.recent.Len() > imageCacheItems || o.bytes > imageCacheBytes {
+			o.removeCached(o.recent.Back())
+		}
+		flight.cached = true
+	}
+	delete(o.pending, key)
+	close(flight.done)
 }
 
 func (o *imageOptimizer) encode(ctx context.Context, profile imageProfile, src imageSource, size int) (imageResult, time.Duration) {
@@ -222,7 +244,7 @@ func (o *imageOptimizer) optimizePart(ctx context.Context, raw *spool, part imag
 		Quality: c.ImageJPEGQuality, ResizeMode: mode, MinSavings: c.ImageMinSavingsBytes, Background: background,
 	}}
 	out.source = size
-	out.result, out.cacheHit, out.encode = o.resolve(ctx, key, src, size)
+	out.result, out.cacheHit, out.encode = o.resolve(ctx, key, src, size, time.Duration(c.ImageTimeoutSeconds)*time.Second)
 	return out
 }
 
@@ -289,16 +311,8 @@ func (o *imageOptimizer) optimize(ctx context.Context, b *preparedBody, c Config
 			continue
 		}
 
-		// Keep aggregate replacements bounded in memory even with no body-size
-		// cap. A temporary storage failure leaves just this URL unchanged.
-		start := b.replacements.size
-		if _, err := io.WriteString(&b.replacements, out.result.url); err != nil {
-			report.skip("temporary_storage", 1, original)
-			continue
-		}
 		b.edits = append(b.edits, imageEdit{
-			start: out.part.url.start + 1, end: out.part.url.end - 1,
-			replacementStart: start, replacementEnd: b.replacements.size,
+			start: out.part.url.start + 1, end: out.part.url.end - 1, url: out.result.url,
 		})
 		b.sizeDelta += int64(len(out.result.url)) - original
 		report.Replaced++

@@ -6,7 +6,7 @@
     compression_enabled: true,
     min_body_bytes: 1024,
     max_body_bytes: 512 * MiB,
-    max_in_flight: 2,
+    max_in_flight: 4,
     zstd_level: 5,
     zstd_window_mib: 8,
     fallback_on_415: true,
@@ -17,7 +17,7 @@
     image_resize_mode: 'fit1080',
     image_tool_resize_mode: 'fit1440',
     image_jpeg_quality: 78,
-    image_min_savings_bytes: 32 * 1024,
+    image_min_savings_bytes: 8 * 1024,
     image_workers: 0,
     image_timeout_seconds: 30,
     image_png_background: 'white'
@@ -201,7 +201,7 @@
     external_url: '外链图片', no_gain: '节省不足', invalid_data_url: 'Data URL 无效',
     invalid_jpeg: 'JPEG 无效', invalid_png: 'PNG 无效', animated_png: '动画 PNG',
     timeout: '图片处理超时', scan_timeout: '扫描超时', invalid_json: 'JSON 扫描失败',
-    read_error: '图片暂时读取失败', encode_error: '编码失败', temporary_storage: '暂存失败'
+    read_error: '图片暂时读取失败', encode_error: '编码失败'
   };
 
   function skipsLabel(skips) {

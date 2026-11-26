@@ -18,19 +18,19 @@ Private signing keys must stay outside release artifacts and the Sub2API runtime
 
 ## Request preparation
 
-The image and Zstd limits apply independently to the original body. Zero permits any body size. For an unknown length with only finite active limits, the plugin keeps the prefix through the larger limit and streams the rest as received when that limit is crossed.
+The image limit applies to the original body. The Zstd limit applies to the body selected after image edits. Zero permits any body size. For an unknown length with only finite active limits, the plugin keeps the prefix through the larger limit and streams the rest as received when that limit is crossed.
 
-A preparation slot covers reading, image processing and Zstd encoding for requests over the larger of 64 KiB and `min_body_bytes`, and for unknown lengths. Known small bodies prepare inline. Upload and response-header waiting begin after the slot is released. The host's own request admission continues to govern concurrent uploads.
+A preparation slot covers reading, image processing and Zstd encoding for requests over the larger of 64 KiB and `min_body_bytes`, and for unknown lengths. The default is four slots. Known small bodies prepare inline. Upload and response-header waiting begin after the slot is released. The host's own request admission continues to govern concurrent uploads.
 
-Raw, replacement and encoded buffers independently spill to anonymous files after 8 MiB. Known large bodies write directly to disk. ReadAt-based cursors support the single identity retry on HTTP 415. Reader leases keep file descriptors alive while the HTTP transport is reading. A compressed request with fallback disabled releases both raw and replacement storage during preparation.
+Raw and encoded buffers independently spill to anonymous files after 8 MiB. Known large bodies write directly to disk. ReadAt-based cursors support the single identity retry on HTTP 415 and a two-minute Zstd cooldown. Reader leases keep file descriptors alive while the HTTP transport is reading. A compressed request with fallback disabled releases the original body and drops its replacement references during preparation.
 
-Zstd uses one encoder worker per request, all-literal entropy compression and the configured level and window. The default is level 5 with an 8 MiB window. The Go encoder groups the configured levels into three modes. The executable sets a 512 MiB soft GC target. The host manages its own request-body memory.
+Zstd uses one encoder worker per request, all-literal entropy compression and the configured level and window. The default is level 5 with an 8 MiB window. The Go encoder groups the configured levels into three modes. The pool retains up to four idle encoders. The executable sets a 1 GiB soft GC target. The host manages its own request-body memory.
 
 ## Image optimization
 
-The scanner records up to 512 image URL spans while validating the rest of the JSON. Collected images can be used when a request has more than 512 parts. The source SHA-256 covers decoded image bytes. The cache key also includes the effective geometry, quality, savings floor and applicable PNG background. The in-memory LRU holds up to 128 MiB of encoded URLs and 1024 entries, expiring entries after six idle hours. It stores successful replacements and deterministic skips. Workers wait for a shared encoding permit within the request's image budget. Concurrent misses for the same key share a conversion, and timeouts allow future retries.
+The scanner records up to 2048 image URL spans while validating the rest of the JSON. Collected edits still apply when more image parts follow. The source SHA-256 covers decoded image bytes. The cache key also includes the effective geometry, quality, savings floor and applicable PNG background. The in-memory LRU holds up to 128 MiB of encoded URLs and 1024 entries, expiring entries after six idle hours. It stores successful replacements and deterministic skips. Concurrent misses share one encode with its own timeout and pin on the source buffer. Each request waits within its own image budget and can leave independently.
 
-The source checks cap compressed file size, dimensions and total pixels. The JPEG encoder stops when its result would miss the configured savings floor. The replacement spool bounds request-buffer memory even when the combined edited URLs exceed 16 MiB. Edits are applied in original JSON byte order. A configuration or codec change can change the representation of an existing image.
+The source checks cap compressed file size, dimensions and total pixels. The JPEG encoder stops when its result would miss the configured savings floor, which defaults to 8 KiB. Edits share the encoded URL strings and are applied in original JSON byte order. An in-flight request can still hold a string after LRU eviction. A configuration or codec change can change the representation of an existing image.
 
 ## Statistics
 

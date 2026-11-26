@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -20,6 +22,10 @@ type spool struct {
 	memory []byte
 	file   *os.File
 	size   int64
+
+	mu     sync.Mutex
+	pins   int
+	closed bool
 }
 
 func (s *spool) Write(p []byte) (int, error) {
@@ -32,20 +38,6 @@ func (s *spool) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	n, err := s.file.Write(p)
-	s.size += int64(n)
-	return n, err
-}
-
-func (s *spool) WriteString(value string) (int, error) {
-	if s.file == nil && s.size+int64(len(value)) <= spoolMemoryBytes {
-		s.memory = append(s.memory, value...)
-		s.size += int64(len(value))
-		return len(value), nil
-	}
-	if err := s.spill(); err != nil {
-		return 0, err
-	}
-	n, err := s.file.WriteString(value)
 	s.size += int64(n)
 	return n, err
 }
@@ -84,15 +76,37 @@ func (s *spool) reader() io.ReadCloser {
 	return io.NopCloser(bytes.NewReader(s.memory))
 }
 
+// Image flights may pin fully written spools while a request is still using
+// them. The last flight frees the storage if the request has already closed.
+func (s *spool) pin() {
+	s.mu.Lock()
+	s.pins++
+	s.mu.Unlock()
+}
+
+func (s *spool) unpin() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pins--
+	s.closeIfUnused()
+}
+
 func (s *spool) close() {
-	if s == nil {
-		return
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	s.closeIfUnused()
+}
+
+// The caller holds mu.
+func (s *spool) closeIfUnused() {
+	if s.closed && s.pins == 0 {
+		if s.file != nil {
+			_ = s.file.Close()
+			s.file = nil
+		}
+		s.memory = nil
 	}
-	if s.file != nil {
-		_ = s.file.Close()
-		s.file = nil
-	}
-	s.memory = nil
 }
 
 func (s *spool) section(start, end int64) io.Reader {
@@ -103,7 +117,7 @@ func (s *spool) section(start, end int64) io.Reader {
 }
 
 type preparedBody struct {
-	raw, encoded, replacements      spool
+	raw, encoded                    spool
 	edits                           []imageEdit
 	sizeDelta                       int64
 	imageReport                     imageReport
@@ -120,7 +134,7 @@ func (b *preparedBody) selectedReader() io.Reader {
 	readers := make([]io.Reader, 0, len(b.edits)*2+1)
 	var pos int64
 	for _, edit := range b.edits {
-		readers = append(readers, b.raw.section(pos, edit.start), b.replacements.section(edit.replacementStart, edit.replacementEnd))
+		readers = append(readers, b.raw.section(pos, edit.start), strings.NewReader(edit.url))
 		pos = edit.end
 	}
 	return io.MultiReader(append(readers, b.raw.section(pos, b.raw.size))...)
@@ -128,7 +142,6 @@ func (b *preparedBody) selectedReader() io.Reader {
 
 func (b *preparedBody) closeOriginal() {
 	b.raw.close()
-	b.replacements.close()
 	b.edits = nil
 }
 
@@ -152,7 +165,7 @@ func (e *timedEncoder) Write(data []byte) (int, error) {
 }
 
 // When images are inactive, read and encode in one pass. Otherwise the raw
-// spool supplies JSON sections and the replacement spool supplies edited URLs.
+// spool supplies JSON sections around the edited URLs.
 func (p *Plugin) prepareBody(ctx context.Context, src io.ReadCloser, length int64, c Config, compress, images bool) (out *preparedBody, err error) {
 	b := &preparedBody{}
 	keepSource := false
@@ -220,14 +233,15 @@ func (p *Plugin) prepareBody(ctx context.Context, src io.ReadCloser, length int6
 	if images && !bodyExceedsLimit(b.raw.size, c.ImageMaxBodyBytes) {
 		b.imageReport = p.images.optimize(ctx, b, c)
 	}
-	if compress && b.selectedSize() >= c.MinBodyBytes && !bodyExceedsLimit(b.raw.size, c.MaxBodyBytes) {
+	selectedSize := b.selectedSize()
+	if compress && selectedSize >= c.MinBodyBytes && !bodyExceedsLimit(selectedSize, c.MaxBodyBytes) {
 		start := time.Now()
 		if images {
 			encoder, err = p.encoder(c)
 			if err != nil {
 				return nil, err
 			}
-			encoder.ResetContentSize(&b.encoded, b.selectedSize())
+			encoder.ResetContentSize(&b.encoded, selectedSize)
 			if _, err = io.CopyBuffer(encoder, contextImageReader{ctx, b.selectedReader()}, buffer); err != nil {
 				return nil, err
 			}
@@ -236,9 +250,9 @@ func (p *Plugin) prepareBody(ctx context.Context, src io.ReadCloser, length int6
 			return nil, err
 		}
 		b.zstdTime += time.Since(start)
-		b.compressed = b.encoded.size < b.selectedSize()
+		b.compressed = b.encoded.size < selectedSize
 	}
-	b.usedDisk = b.raw.file != nil || b.encoded.file != nil || b.replacements.file != nil
+	b.usedDisk = b.raw.file != nil || b.encoded.file != nil
 	if b.compressed {
 		if !c.FallbackOn415 {
 			b.closeOriginal()

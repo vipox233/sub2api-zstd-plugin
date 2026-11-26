@@ -6,10 +6,10 @@ Run the same `BenchmarkOutboundPreparation` fixture on `main` at `8c7fcd0` and o
 
 | Synthetic request | Original JSON | HTTP body bytes, before → after | JSON bytes saved, before → after | Local time, before → after |
 |---|---:|---:|---:|---:|
-| Single 4K screenshot | 17,316,446 B | 425,832 → 324,253 B | 97.54% → 98.13% | 561 → 468 ms |
-| Four screenshots in history | 30,922,715 B | 12,457,724 → 1,135,586 B | 59.71% → 96.33% | 149 → 92 ms |
-| Six 4K screenshots | 104,013,090 B | 78,026,822 → 1,646,737 B | 24.98% → 98.42% | 429 → 1,130 ms |
-| Long text with a repeated prefix | 3,670,028 B | 2,746,214 → 2,157,889 B | 25.17% → 41.20% | 27.8 → 16.5 ms |
+| Single 4K screenshot | 17,316,446 B | 425,832 → 324,253 B | 97.54% → 98.13% | 561 → 449 ms |
+| Four screenshots in history | 30,922,715 B | 12,457,724 → 1,135,586 B | 59.71% → 96.33% | 149 → 68 ms |
+| Six 4K screenshots | 104,013,090 B | 78,026,822 → 1,646,737 B | 24.98% → 98.42% | 429 → 1,168 ms |
+| Long text with a repeated prefix | 3,670,028 B | 2,746,214 → 2,157,889 B | 25.17% → 41.20% | 27.8 → 17.4 ms |
 
 Local timing includes preparation and reading the body into a mock transport. At 5 Mbps, the six-image sample's payload alone would take about 125 → 2.6 seconds to send. Production first-token latency, OCR and upstream prompt-cache behavior depend on the actual requests and upstream.
 

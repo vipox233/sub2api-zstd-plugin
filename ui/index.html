@@ -51,16 +51,16 @@
             <label class="field" for="min_body_bytes">
               <span>最小请求体 <span class="unit">字节</span></span>
               <input id="min_body_bytes" type="number" value="1024" min="1" max="1048576" step="1" inputmode="numeric" required>
-              <small>小于此值直接发送，默认 1 KiB。</small>
+              <small>小于此值跳过 Zstd，默认 1 KiB。</small>
             </label>
             <label class="field" for="max_body_mib">
               <span>最大压缩请求体 <span class="unit">MiB</span></span>
               <input id="max_body_mib" type="number" value="512" min="0" step="any" inputmode="decimal" required>
-              <small>填 0 表示不限。超过此值的请求跳过 zstd。</small>
+              <small>按换图后体积判断。填 0 表示不限。</small>
             </label>
             <label class="field" for="max_in_flight">
               <span>大请求准备并发</span>
-              <input id="max_in_flight" type="number" value="2" min="1" step="1" inputmode="numeric" required>
+              <input id="max_in_flight" type="number" value="4" min="1" step="1" inputmode="numeric" required>
               <small>读体、换图和压缩共用名额。上传前释放，小请求可独立准备。</small>
             </label>
             <label class="field" for="zstd_level">
@@ -89,7 +89,7 @@
           <p id="memory-budget" class="hint budget">每个缓冲超过 8 MiB 时溢写匿名临时文件。</p>
           <label class="checkbox-row" for="fallback_on_415">
             <input id="fallback_on_415" type="checkbox" checked>
-            <span><strong>上游返回 HTTP 415 时，回退一次未压缩请求</strong><small>只处理明确的媒体类型拒绝，不对网络错误或普通 400 自动重发。</small></span>
+            <span><strong>上游返回 HTTP 415 时，回退一次未压缩请求</strong><small>回退后暂停 Zstd 2 分钟，图片优化照常生效。</small></span>
           </label>
           <div class="field proxy-field">
             <label for="proxy_mode">上游代理</label>
@@ -138,7 +138,7 @@
             </label>
             <label class="field" for="image_min_savings_kib">
               <span>至少节省 <span class="unit">KiB</span></span>
-              <input id="image_min_savings_kib" type="number" value="32" min="0" max="32768" step="any" required>
+              <input id="image_min_savings_kib" type="number" value="8" min="0" max="32768" step="any" required>
               <small>按图片文件字节计算。填 0 时，候选更小就采用。</small>
             </label>
             <label class="field" for="image_png_background">

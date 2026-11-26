@@ -294,6 +294,25 @@ type closeTrackingBody struct {
 
 func (b *closeTrackingBody) Close() error { b.closed.Store(true); return nil }
 
+func TestZstdPoolKeepsDefaultPreparationCapacity(t *testing.T) {
+	p := testPlugin(t, map[string]any{"max_in_flight": 4})
+	c := p.state.config
+	var encoders [4]*zstd.Encoder
+	for i := range encoders {
+		encoder, err := p.encoder(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoders[i] = encoder
+	}
+	for _, encoder := range encoders {
+		p.putEncoder(encoder, c)
+	}
+	if got := len(p.encoders); got < len(encoders) {
+		t.Fatalf("idle pool retained %d encoders, want at least %d", got, len(encoders))
+	}
+}
+
 func Test415FallsBackOnceAndCachesUnsupportedEndpoint(t *testing.T) {
 	p := testPlugin(t, nil)
 	body := requestFixture(20)
@@ -313,8 +332,12 @@ func Test415FallsBackOnceAndCachesUnsupportedEndpoint(t *testing.T) {
 		}
 		return resp, nil
 	}
+	minCooldownUntil := time.Now().Add(2 * time.Minute).Unix()
 	resp, err := p.RoundTrip(testRequest(t, officialURL, body), oauthMeta(body))
 	closeResponse(t, resp, err)
+	if deadline := p.cooldownUntil.Load(); deadline < minCooldownUntil || deadline > time.Now().Add(2*time.Minute).Unix() {
+		t.Fatalf("415 cooldown should end two minutes after the response, got %v", time.Unix(deadline, 0))
+	}
 	if len(attempts) != 2 {
 		t.Fatalf("expected exactly compressed + plain attempts, got %d", len(attempts))
 	}

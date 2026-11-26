@@ -11,7 +11,7 @@ import (
 
 const (
 	maxImageJSONDepth = 64
-	maxImageParts     = 512
+	maxImageParts     = 2048
 )
 
 var errImageJSON = errors.New("unsupported or malformed image request JSON")

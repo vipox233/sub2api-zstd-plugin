@@ -549,28 +549,18 @@ func TestZstdWindowFollowsConfigReload(t *testing.T) {
 	}
 }
 
-func TestImageReplacementSpoolCanExceed16MiB(t *testing.T) {
+func TestImageReplacementURLsCanExceed16MiB(t *testing.T) {
 	b := &preparedBody{}
 	defer b.close()
 	original := `{"input":["a","b"]}`
-	if _, err := b.raw.WriteString(original); err != nil {
+	if _, err := b.raw.Write([]byte(original)); err != nil {
 		t.Fatal(err)
 	}
 	first, second := strings.Repeat("A", 9<<20), strings.Repeat("B", 9<<20)
-	// Encode completions arrived out of order. Each edit retains its own
-	// replacement offset, independent of the order in which JSON is patched.
-	for _, replacement := range []string{second, first} {
-		if _, err := b.replacements.WriteString(replacement); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if b.replacements.file == nil {
-		t.Fatal("large replacements must spill to disk")
-	}
 	firstStart, secondStart := strings.Index(original, "a"), strings.Index(original, "b")
 	b.edits = []imageEdit{
-		{start: int64(firstStart), end: int64(firstStart + 1), replacementStart: int64(len(second)), replacementEnd: b.replacements.size},
-		{start: int64(secondStart), end: int64(secondStart + 1), replacementEnd: int64(len(second))},
+		{start: int64(firstStart), end: int64(firstStart + 1), url: first},
+		{start: int64(secondStart), end: int64(secondStart + 1), url: second},
 	}
 	b.sizeDelta = int64(len(first) + len(second) - 2)
 	got, want := sha256.New(), sha256.New()
@@ -582,6 +572,6 @@ func TestImageReplacementSpoolCanExceed16MiB(t *testing.T) {
 		_, _ = io.WriteString(want, part)
 	}
 	if !bytes.Equal(got.Sum(nil), want.Sum(nil)) {
-		t.Fatal("replacement offsets changed the selected JSON")
+		t.Fatal("replacement URL references changed the selected JSON")
 	}
 }

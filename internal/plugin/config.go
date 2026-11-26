@@ -16,7 +16,7 @@ const (
 	imageOriginal          = "original"
 	imageFollow            = "follow"
 	defaultImageQuality    = 78
-	defaultImageMinSavings = 32 << 10
+	defaultImageMinSavings = 8 << 10
 	legacyImageJPEGQuality = 92
 	maxConfigInteger       = 1<<53 - 1 // Exact JSON integer in the browser UI.
 )
@@ -47,7 +47,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		CompressionEnabled: true, MinBodyBytes: 1024, MaxBodyBytes: 512 << 20,
-		MaxInFlight: 2, FallbackOn415: true, ResponseHeaderTimeoutSeconds: 600, ProxyMode: "account",
+		MaxInFlight: 4, FallbackOn415: true, ResponseHeaderTimeoutSeconds: 600, ProxyMode: "account",
 		ZstdLevel: 5, ZstdWindowMiB: 8,
 		ImageResizeMode: imageFit1080, ImageToolResizeMode: imageFit1440,
 		ImageJPEGQuality: defaultImageQuality, ImageMinSavingsBytes: defaultImageMinSavings,

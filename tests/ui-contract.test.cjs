@@ -16,14 +16,14 @@ const appSource = fs.readFileSync(path.join(ui, 'assets/app.js'), 'utf8');
 const MiB = 1024 * 1024;
 const defaults = {
   compression_enabled: true, min_body_bytes: 1024, max_body_bytes: 512 * MiB,
-  max_in_flight: 2, zstd_level: 5, zstd_window_mib: 8, fallback_on_415: true, response_header_timeout_seconds: 600,
+  max_in_flight: 4, zstd_level: 5, zstd_window_mib: 8, fallback_on_415: true, response_header_timeout_seconds: 600,
   proxy_mode: 'account',
   image_enabled: false,
   image_max_body_bytes: 0,
   image_resize_mode: 'fit1080',
   image_tool_resize_mode: 'fit1440',
   image_jpeg_quality: 78,
-  image_min_savings_bytes: 32768,
+  image_min_savings_bytes: 8192,
   image_workers: 0,
   image_timeout_seconds: 30,
   image_png_background: 'white'
@@ -169,6 +169,8 @@ test('app loads saved configuration and read-only status automatically; negative
   assert.deepEqual(h.callTypes(), ['config.load', 'plugin.status']);
   assert.equal(h.elements.get('max_body_mib').value, '512');
   assert.equal(h.elements.get('image_max_body_mib').value, '0');
+  assert.equal(h.elements.get('max_in_flight').value, '4');
+  assert.equal(h.elements.get('image_min_savings_kib').value, '8');
   assert.equal(h.elements.get('save').disabled, false);
   assert.equal(h.elements.get('stat-compressed').textContent, '2');
   assert.equal(h.elements.get('stat-saved').textContent, '-25.0%');
@@ -299,7 +301,7 @@ test('old image settings migrate while the saved zstd cap stays at 16 MiB', asyn
   assert.equal(h.elements.get('image_enabled').checked, true);
   assert.equal(h.elements.get('image_resize_mode').value, 'fit1080');
   assert.equal(h.elements.get('image_jpeg_quality').value, '78');
-  assert.equal(h.elements.get('image_min_savings_kib').value, '32');
+  assert.equal(h.elements.get('image_min_savings_kib').value, '8');
   assert.equal(h.callTypes().includes('config.save'), false);
   h.elements.get('config-form').fire('submit'); await settle();
   const saved = h.messages.find(m => m.type === 'config.save').config;
@@ -310,10 +312,15 @@ test('old image settings migrate while the saved zstd cap stays at 16 MiB', asyn
 test('v1.4 saved image caps and quality survive loading and saving with new fields', async () => {
   const { image_tool_resize_mode, image_workers, image_timeout_seconds, image_png_background,
     zstd_level, zstd_window_mib, ...v14 } = defaults;
-  const oldConfig = { ...v14, image_enabled: true, image_max_body_bytes: 64 * MiB, image_jpeg_quality: 86 };
+  const oldConfig = {
+    ...v14, max_in_flight: 2, image_enabled: true, image_max_body_bytes: 64 * MiB,
+    image_jpeg_quality: 86, image_min_savings_bytes: 32 * 1024
+  };
   const h = harness({ autoReply: true, config: oldConfig }); h.runApp(); await settle();
   assert.equal(h.elements.get('image_max_body_mib').value, '64');
   assert.equal(h.elements.get('image_jpeg_quality').value, '86');
+  assert.equal(h.elements.get('max_in_flight').value, '2');
+  assert.equal(h.elements.get('image_min_savings_kib').value, '32');
   assert.equal(h.elements.get('image_workers').value, '0');
   h.elements.get('config-form').fire('submit'); await settle();
   assert.deepEqual(h.messages.find(m => m.type === 'config.save').config, { ...defaults, ...oldConfig });

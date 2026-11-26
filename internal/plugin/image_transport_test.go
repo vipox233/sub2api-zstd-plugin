@@ -217,49 +217,67 @@ func TestImageRewritePreservesRawJSONAndHistory(t *testing.T) {
 	}
 }
 
-func TestUnknownLengthBodyRespectsIndependentImageAndZstdLimits(t *testing.T) {
-	_, original := imageTestSource(t)
+func TestImageAndZstdBodyLimits(t *testing.T) {
+	const width, height = 640, 320
+	original := imageTestDataURL(imageTestJPEG, imageTestJPEGSource(t, width, height))
 	body := imageTestTurn(imageTestUser(original, "auto"))
 	size := int64(len(body))
+	reference := imageTestPlugin(t, map[string]any{"compression_enabled": false})
+	selected := imageTestUnpack(t, imageTestSend(t, reference, body), "")
+	imageTestReadJPEG(t, selected, width, height)
+	selectedSize := int64(len(selected))
+	if selectedSize <= 1024 || selectedSize >= size {
+		t.Fatalf("body-size fixture must shrink across a valid Zstd limit: %d → %d", size, selectedSize)
+	}
+
 	for _, tc := range []struct {
-		name                      string
-		zstdLimit, imageLimit     int64
-		wantEncoding              string
-		wantJPEG, wantPassThrough bool
+		name                  string
+		zstdLimit, imageLimit int64
+		wantEncoding          string
+		wantRewrite, tooLarge bool
 	}{
-		{"at both limits", size, size, "zstd", true, false},
-		{"only image fits", size - 1, size, "", true, false},
-		{"only zstd fits", size, size - 1, "zstd", false, false},
-		{"unlimited image", size - 1, 0, "", true, false},
+		{"selected body at zstd limit", selectedSize, size, "zstd", true, false},
+		{"selected body above zstd limit", selectedSize - 1, size, "", true, true},
+		{"original above image limit", size, size - 1, "zstd", false, false},
+		{"unlimited image", selectedSize, 0, "zstd", true, false},
 		{"unlimited zstd", 0, size - 1, "zstd", false, false},
-		{"over both limits", size / 2, size / 2, "", false, true},
+		{"original above both limits", size / 2, size / 2, "", false, true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := imageTestPlugin(t, map[string]any{"max_body_bytes": tc.zstdLimit, "image_max_body_bytes": tc.imageLimit})
-			req := imageTestRequest(t, body)
-			meta := oauthMeta(body)
-			req.ContentLength = -1
-			meta.ContentLength = -1
-			var got capture
-			p.roundTripOverride = captureTransport(t, &got)
-			resp, err := p.RoundTrip(req, meta)
-			closeResponse(t, resp, err)
-			if tc.wantPassThrough {
-				if got.length != -1 || got.headers.Get("Content-Encoding") != "" || !bytes.Equal(got.body, body) {
-					t.Fatal("oversize request did not stream its exact original body")
+		for _, length := range []string{"known_length", "unknown_length"} {
+			t.Run(tc.name+"/"+length, func(t *testing.T) {
+				p := imageTestPlugin(t, map[string]any{"max_body_bytes": tc.zstdLimit, "image_max_body_bytes": tc.imageLimit})
+				req := imageTestRequest(t, body)
+				meta := oauthMeta(body)
+				if length == "unknown_length" {
+					req.ContentLength = -1
+					meta.ContentLength = -1
 				}
-				return
-			}
-			selected := imageTestUnpack(t, got, tc.wantEncoding)
-			want := body
-			if tc.wantJPEG {
-				replacement := imageTestReadJPEG(t, selected, imageTestWidth, imageTestHeight)
-				want = imageTestTurn(imageTestUser(replacement, "auto"))
-			}
-			if !bytes.Equal(selected, want) {
-				t.Fatal("request changed outside the eligible image URL")
-			}
-		})
+				var got capture
+				p.roundTripOverride = captureTransport(t, &got)
+				resp, err := p.RoundTrip(req, meta)
+				closeResponse(t, resp, err)
+				var wantLarge int64
+				if tc.tooLarge {
+					wantLarge = 1
+				}
+				if gotLarge := p.stats.large.Load(); gotLarge != wantLarge {
+					t.Fatalf("Zstd size-limit count = %d, want %d", gotLarge, wantLarge)
+				}
+				if length == "unknown_length" && tc.tooLarge && !tc.wantRewrite {
+					if got.length != -1 || got.headers.Get("Content-Encoding") != "" || !bytes.Equal(got.body, body) {
+						t.Fatal("oversize request did not stream its exact original body")
+					}
+					return
+				}
+				want := body
+				if tc.wantRewrite {
+					want = selected
+				}
+				if forwarded := imageTestUnpack(t, got, tc.wantEncoding); !bytes.Equal(forwarded, want) {
+					t.Fatal("forwarded JSON did not match the selected image body")
+				}
+			})
+		}
 	}
 }
 
@@ -439,7 +457,7 @@ func TestImageRewriteAdoptsExactly32KiBNetSavings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			original := imageTestAddJPEGSegment(source, 0xfe, make([]byte, tc.comment))
 			body := imageTestTurn(imageTestUser(imageTestDataURL(imageTestJPEG, original), "auto"))
-			p := imageTestPlugin(t, map[string]any{"compression_enabled": false})
+			p := imageTestPlugin(t, map[string]any{"compression_enabled": false, "image_min_savings_bytes": 32 << 10})
 			got := imageTestUnpack(t, imageTestSend(t, p, body), "")
 			want := body
 			if tc.adopt {

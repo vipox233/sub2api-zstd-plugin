@@ -16,10 +16,10 @@ func TestConfigDefaultsAndValidation(t *testing.T) {
 	if cfg != DefaultConfig() {
 		t.Fatalf("empty object must normalize to defaults: %#v", cfg)
 	}
-	if !cfg.CompressionEnabled || !cfg.FallbackOn415 || cfg.MinBodyBytes != 1024 || cfg.MaxBodyBytes != 512*1024*1024 || cfg.MaxInFlight != 2 || cfg.ProxyMode != "account" {
+	if !cfg.CompressionEnabled || !cfg.FallbackOn415 || cfg.MinBodyBytes != 1024 || cfg.MaxBodyBytes != 512*1024*1024 || cfg.MaxInFlight != 4 || cfg.ProxyMode != "account" {
 		t.Fatalf("unexpected release defaults: %#v", cfg)
 	}
-	if cfg.ImageEnabled || cfg.ImageMaxBodyBytes != 0 || cfg.ImageResizeMode != imageFit1080 || cfg.ImageJPEGQuality != 78 || cfg.ImageMinSavingsBytes != 32768 {
+	if cfg.ImageEnabled || cfg.ImageMaxBodyBytes != 0 || cfg.ImageResizeMode != imageFit1080 || cfg.ImageJPEGQuality != 78 || cfg.ImageMinSavingsBytes != 8<<10 {
 		t.Fatalf("unexpected default image configuration: %#v", cfg)
 	}
 	if cfg.ImageToolResizeMode != imageFit1440 || cfg.ImageWorkers != 0 ||
@@ -112,10 +112,10 @@ func TestImagePresetQualityAndSavings(t *testing.T) {
 		quality int
 		savings int
 	}{
-		{`{"image_resize_mode":"fit1440"}`, imageFit1440, 78, 32768},
-		{`{"image_resize_mode":"original"}`, imageOriginal, 78, 32768},
+		{`{"image_resize_mode":"fit1440"}`, imageFit1440, 78, 8 << 10},
+		{`{"image_resize_mode":"original"}`, imageOriginal, 78, 8 << 10},
 		{`{"image_resize_mode":"fit1440","image_jpeg_quality":77,"image_min_savings_bytes":0,"image_min_savings_percent":25}`, imageFit1440, 77, 0},
-		{`{"image_max_long_edge":0,"image_jpeg_quality":97}`, imageFit1080, 97, 32768},
+		{`{"image_max_long_edge":0,"image_jpeg_quality":97}`, imageFit1080, 97, 8 << 10},
 	} {
 		t.Run(tt.raw, func(t *testing.T) {
 			cfg, err := DecodeConfig([]byte(tt.raw))

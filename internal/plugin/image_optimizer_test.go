@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -159,9 +160,10 @@ func TestImageRewriteConvertsMoreThanTwoColdImagesInOrder(t *testing.T) {
 }
 
 func TestImageRewriteKeepsCollectedPartsAtScannerLimit(t *testing.T) {
+	const imagePartsLimit = 2048
 	source := imageTestDataURL(imageTestPNG, imageTestEncodePNG(t, image.NewGray(image.Rect(0, 0, 64, 64))))
 	part := `{"type":"input_image","image_url":` + strconv.Quote(source) + `}`
-	parts := strings.Repeat(part+",", maxImageParts+1) + part
+	parts := strings.Repeat(part+",", imagePartsLimit+1) + part
 	item := `{"role":"user","content":[` + parts + `]}`
 	body := imageTestTurn(item)
 	p := imageTestPlugin(t, map[string]any{"compression_enabled": false, "image_min_savings_bytes": 0})
@@ -169,12 +171,12 @@ func TestImageRewriteKeepsCollectedPartsAtScannerLimit(t *testing.T) {
 	if !bytes.Contains(got, []byte(imageTestJPEG)) || bytes.Count(got, []byte(source)) != 2 {
 		t.Fatal("image part limit did not preserve collected replacements and pass through the excess")
 	}
-	if bytes.Count(got, []byte(imageTestJPEG)) != maxImageParts {
+	if bytes.Count(got, []byte(imageTestJPEG)) != imagePartsLimit {
 		t.Fatal("first image parts were not all optimized")
 	}
 	entry := readImageRequestStatus(t, p).Recent[0]
-	if !entry.CountsKnown || entry.Images != maxImageParts+2 || entry.Replaced != maxImageParts ||
-		entry.Misses != 1 || entry.Hits != maxImageParts-1 || entry.Skips["part_limit"] != 2 {
+	if !entry.CountsKnown || entry.Images != imagePartsLimit+2 || entry.Replaced != imagePartsLimit ||
+		entry.Misses != 1 || entry.Hits != imagePartsLimit-1 || entry.Skips["part_limit"] != 2 {
 		t.Fatalf("image cap or repeated-source cache statistics are wrong: %#v", entry)
 	}
 }
@@ -200,6 +202,93 @@ func TestImageWorkerPoolUsesConfiguredCapacity(t *testing.T) {
 	}
 }
 
+func TestImageFlightSurvivesOriginalRequestCancellation(t *testing.T) {
+	const width, height = 640, 320
+	source := imageTestDataURL(imageTestJPEG, imageTestJPEGSource(t, width, height))
+	body := imageTestTurn(imageTestUser(source, "auto"))
+	p := imageTestPlugin(t, map[string]any{"compression_enabled": false, "image_workers": 1})
+
+	ctx, stop := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stop()
+	if !p.images.acquireWorker(ctx) {
+		t.Fatal("could not occupy the single cold worker")
+	}
+	release := sync.OnceFunc(p.images.releaseWorker)
+	defer release()
+
+	// The first request owns a file-backed spool. Keep the encoder queued so
+	// it has to read that file after the initiating RoundTrip has returned.
+	const prefix, suffix = ",\"padding\":\"", "\"}\n"
+	original := body[:len(body)-2]
+	first := imageTestRequest(t, body)
+	first.Body = io.NopCloser(io.MultiReader(bytes.NewReader(original), strings.NewReader(prefix),
+		io.LimitReader(&patternReader{}, spoolMemoryBytes), strings.NewReader(suffix)))
+	first.ContentLength = int64(len(original) + len(prefix) + spoolMemoryBytes + len(suffix))
+	canceled, cancel := context.WithCancel(ctx)
+	defer cancel()
+	first = first.WithContext(canceled)
+	var got capture
+	p.roundTripOverride = captureTransport(t, &got)
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- forwardRequest(p, first, body) }()
+
+	var key imageCacheKey
+	var originalFlight *imageFlight
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for originalFlight == nil {
+		p.images.mu.Lock()
+		for k, flight := range p.images.pending {
+			key, originalFlight = k, flight
+		}
+		p.images.mu.Unlock()
+		if originalFlight == nil {
+			select {
+			case <-tick.C:
+			case <-ctx.Done():
+				t.Fatal("first request did not queue a cold encode")
+			}
+		}
+	}
+	cancel()
+	select {
+	case err := <-firstDone:
+		if err == nil || p.recent.snapshot()[0].Attempts != 0 {
+			t.Fatal("first request should return without sending after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first request waited for the blocked shared encoder after cancellation")
+	}
+
+	p.images.mu.Lock()
+	queued := p.images.pending[key]
+	p.images.mu.Unlock()
+	if queued != originalFlight {
+		t.Fatal("cancelling the first request discarded its shared encode")
+	}
+	second := imageTestRequest(t, body).WithContext(ctx)
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- forwardRequest(p, second, body) }()
+	release()
+	finishResult(t, secondDone)
+
+	select {
+	case <-originalFlight.done:
+		if originalFlight.result.reason != "" {
+			t.Fatalf("shared encode failed after its original waiter canceled: %s", originalFlight.result.reason)
+		}
+	case <-ctx.Done():
+		t.Fatal("original shared encode never finished")
+	}
+	selected := imageTestUnpack(t, got, "")
+	if replacement := imageTestReadJPEG(t, selected, width, height); replacement != originalFlight.result.url {
+		t.Fatal("second request did not receive the shared image result")
+	}
+	if entry := readImageRequestStatus(t, p).Recent[0]; entry.Hits != 1 || entry.Misses != 0 {
+		t.Fatalf("second request started another encode: %#v", entry)
+	}
+}
+
 func TestImageRewriteRetriesAfterTemporaryWorkerTimeout(t *testing.T) {
 	const width, height = 640, 320
 	source := imageTestDataURL(imageTestJPEG, imageTestJPEGSource(t, width, height))
@@ -214,6 +303,21 @@ func TestImageRewriteRetriesAfterTemporaryWorkerTimeout(t *testing.T) {
 		defer p.images.releaseWorker()
 		if got := imageTestUnpack(t, imageTestSend(t, p, body), ""); !bytes.Equal(got, body) {
 			t.Fatal("a timed-out image should pass through for this request")
+		}
+		// The shared encode has its own budget. Keep the worker occupied
+		// until that budget expires as well, then verify a fresh retry.
+		p.images.mu.Lock()
+		var pending *imageFlight
+		for _, flight := range p.images.pending {
+			pending = flight
+		}
+		p.images.mu.Unlock()
+		if pending != nil {
+			select {
+			case <-pending.done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("shared encode did not expire")
+			}
 		}
 	}()
 	status := readImageRequestStatus(t, p)

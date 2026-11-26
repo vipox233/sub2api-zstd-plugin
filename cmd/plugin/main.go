@@ -11,7 +11,7 @@ import (
 
 func main() {
 	// This is a GC target, not a hard process memory limit.
-	debug.SetMemoryLimit(512 << 20)
+	debug.SetMemoryLimit(1 << 30)
 	p := plugin.New(metadata.Info)
 	defer p.Close()
 	sdk.Serve(p)

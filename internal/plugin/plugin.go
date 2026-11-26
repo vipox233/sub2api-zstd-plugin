@@ -170,7 +170,7 @@ func (p *Plugin) encoder(c Config) (*zstd.Encoder, error) {
 func (p *Plugin) putEncoder(e *zstd.Encoder, c Config) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.closed && sameZstdSettings(p.state.config, c) && len(p.encoders) < 2 {
+	if !p.closed && sameZstdSettings(p.state.config, c) && len(p.encoders) < 4 {
 		p.encoders = append(p.encoders, e)
 	}
 }
@@ -336,7 +336,7 @@ func (p *Plugin) RoundTrip(req *http.Request, meta *sdk.RequestMeta) (*http.Resp
 		p.stats.cooldown.Add(1)
 	case !hasBody || (r.ContentLength > 0 && r.ContentLength < c.MinBodyBytes):
 		p.stats.small.Add(1)
-	case bodyExceedsLimit(r.ContentLength, c.MaxBodyBytes):
+	case !imageEligible && bodyExceedsLimit(r.ContentLength, c.MaxBodyBytes):
 		p.stats.large.Add(1)
 	default:
 		zstdEligible = true
@@ -403,7 +403,7 @@ func (p *Plugin) RoundTrip(req *http.Request, meta *sdk.RequestMeta) (*http.Resp
 						switch {
 						case prepared.selectedSize() < c.MinBodyBytes:
 							p.stats.small.Add(1)
-						case bodyExceedsLimit(prepared.raw.size, c.MaxBodyBytes):
+						case bodyExceedsLimit(record.AfterImageBytes, c.MaxBodyBytes):
 							p.stats.large.Add(1)
 						default:
 							p.stats.noGain.Add(1)
@@ -443,7 +443,7 @@ func (p *Plugin) RoundTrip(req *http.Request, meta *sdk.RequestMeta) (*http.Resp
 	record.UpstreamStatus = resp.StatusCode
 	if record.Zstd && resp.StatusCode == http.StatusUnsupportedMediaType && c.FallbackOn415 {
 		// Retry the identical selected JSON once, using an independent cursor.
-		p.cooldownUntil.Store(time.Now().Add(10 * time.Minute).Unix())
+		p.cooldownUntil.Store(time.Now().Add(2 * time.Minute).Unix())
 		if resp.Body != nil {
 			_ = resp.Body.Close()
 		}
