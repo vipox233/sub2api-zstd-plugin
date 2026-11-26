@@ -10,11 +10,22 @@ GOMAXPROCS=4 go test ./internal/plugin -run '^$' -bench '^BenchmarkOutboundPrepa
 SUB2API_LARGE_TEST=1 GOFLAGS='-mod=vendor -p=1' go test ./internal/plugin -run '^TestLarge512MiBAndUnlimited$' -count=1 -v -timeout=180s
 make build
 SUB2API_TEST_PLUGIN_BINARY="$PWD/dist/bin/linux-amd64/openai-upstream-zstd" go test -mod=vendor ./internal/plugin -run '^TestPluginSubprocessOfficialV1Protocol$' -count=1
-python3 tools/package.py --binary dist/bin/linux-amd64/openai-upstream-zstd --private-key /private/outside/source/publisher.pem --output-dir dist
 ```
 
 Use an independent publisher key for your own builds and register its public key in the host.
 Private signing keys must stay outside release artifacts and the Sub2API runtime data directory.
+
+## Reuse the CI checks
+
+`ci.yml` calls `checks.yml` on pull requests, pushes to `main` and manual runs. A new run for the same ref cancels the older one. Other workflows in this repository can call the same checks from a job.
+
+```yaml
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+```
+
+The shared job runs Go vet, Go race tests, UI contract tests and the static Linux amd64 build. It uses read-only repository access.
 
 ## Request preparation
 
@@ -36,9 +47,20 @@ The source checks cap compressed file size, dimensions and total pixels. The JPE
 
 Each logical request has one record. `final_bytes` reports bytes consumed by the transport on the last attempt. `wire_bytes` covers all attempts including portions read before a 415 response. These are HTTP body counters. Recent records contain sizes, counts, timings and skip reasons. A request-size skip is recorded at request level before scanning, so the image count is unknown for those records.
 
-Build and verify against the declared 0.2.23 compatibility range with:
+## Publish a signed release
 
-    make pack GO=/path/to/go PRIVATE_KEY=/private/outside/source/publisher.pem
-    go run -mod=vendor ./tools/checkpackage --host-version 0.2.23 --package dist/openai-upstream-zstd-1.5.0-linux-amd64.s2plugin --public-key dist/publisher-public-key.txt
+Use a Linux amd64 checkout of the commit that passed CI, with a new version in `manifest.source.json`. Run this on the signing machine with GitHub CLI authenticated for the repository and the publisher key available outside the checkout.
 
-The check starts the signed executable with the SDK host emulator. Use a separate OAuth test account or isolated gateway to measure real cached tokens, OCR and time to first token.
+```sh
+release_version=$(python3 -c 'import json; print(json.load(open("manifest.source.json"))["version"])')
+release_asset="openai-upstream-zstd-${release_version}-linux-amd64.s2plugin"
+make pack PRIVATE_KEY=/private/outside/source/publisher.pem
+go run ./tools/checkpackage --host-version 0.2.23 \
+  --package "dist/$release_asset" --public-key dist/publisher-public-key.txt
+(cd dist && sha256sum "$release_asset") > "dist/$release_asset.sha256"
+gh release create "v$release_version" "dist/$release_asset" "dist/$release_asset.sha256" \
+  dist/publisher-public-key.txt dist/trusted-publisher.yaml \
+  --target "$(git rev-parse HEAD)" --generate-notes
+```
+
+`checkpackage` verifies the signature and starts the plugin with the SDK host emulator. Use a separate OAuth test account or isolated gateway to measure real cached tokens, OCR and time to first token.
