@@ -64,3 +64,4 @@ gh release create "v$release_version" "dist/$release_asset" "dist/$release_asset
 ```
 
 `checkpackage` verifies the signature and starts the plugin with the SDK host emulator. Use a separate OAuth test account or isolated gateway to measure real cached tokens, OCR and time to first token.
+`checkpackage` writes a single-line JSON report to stdout (`--verify-only` checks signatures and compatibility without starting the Linux amd64 binary). Redirect reports to `dist/` when archiving local positive or negative validation runs instead of committing snapshots under `docs/`.

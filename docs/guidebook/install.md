@@ -2,7 +2,7 @@
 
 ## 升级
 
-1. 在 Sub2API 后台的插件管理上传 `openai-upstream-zstd-1.5.0-linux-amd64.s2plugin`。插件 ID 为 `cn.vipox.openai-upstream-zstd`，发行方为 `vipox-zstd-20261104`。
+1. 从 Releases 下载最新的 `openai-upstream-zstd-<version>-linux-amd64.s2plugin`，在 Sub2API 后台的插件管理上传。插件 ID 为 `cn.vipox.openai-upstream-zstd`，发行方为 `vipox-zstd-20261104`。
 2. 读取当前配置。已保存的图片开关、Zstd 设置、代理、请求体上限、准备并发、画质、单门槛和超时沿用旧值。v1.2.x 的长边和双门槛设置迁移为 1080p 与 8 KiB，旧默认 Q92 迁移为 Q78，较新版本显式保存的画质沿用。
 3. 若旧配置保留 64 MiB 换图上限，把「最大换图请求体」设为 0 即可处理更大的请求。开启图片优化并保存，从同一 HTTP 对话发送两轮带图消息，在最近请求里查看上传体积、缓存命中和跳过原因。
 

@@ -1,4 +1,39 @@
+# Build and release artifacts
 /dist/
+/vendor/
+*.s2plugin
+*.s2plugin.sha256
+/openai-upstream-zstd
+/plugin
+*.exe
+
+# Signing keys
 *.private
 *.pem
+*.key
+
+# Go test, coverage and workspace files
+*.test
+*.out
+coverage.*
+*.prof
+go.work
+go.work.sum
+
+# Python and Node local caches
 __pycache__/
+*.py[cod]
+.venv/
+node_modules/
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
