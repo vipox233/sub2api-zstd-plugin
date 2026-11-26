@@ -6,6 +6,7 @@ Use Go 1.27.3. The repository pins dependencies in go.mod and go.sum. The defaul
 GOFLAGS='-mod=vendor -p=1' go test ./... -count=1 -timeout=120s
 GOFLAGS='-mod=vendor -p=1' go vet ./...
 node --test tests/ui-contract.test.cjs
+GOMAXPROCS=4 go test ./internal/plugin -run '^$' -bench '^BenchmarkOutboundPreparation$' -benchtime=3x -count=1
 SUB2API_LARGE_TEST=1 GOFLAGS='-mod=vendor -p=1' go test ./internal/plugin -run '^TestLarge512MiBAndUnlimited$' -count=1 -v -timeout=180s
 make build
 SUB2API_TEST_PLUGIN_BINARY="$PWD/dist/bin/linux-amd64/openai-upstream-zstd" go test -mod=vendor ./internal/plugin -run '^TestPluginSubprocessOfficialV1Protocol$' -count=1
@@ -15,40 +16,29 @@ python3 tools/package.py --binary dist/bin/linux-amd64/openai-upstream-zstd --pr
 Use an independent publisher key for your own builds and register its public key in the host.
 Private signing keys must stay outside release artifacts and the Sub2API runtime data directory.
 
-The image and zstd stages each use a configurable request-size filter. A zero
-value disables the corresponding filter. Both sizes and the concurrency
-setting use JSON-safe integers. The configured values leave allocation to the
-actual requests.
+## Request preparation
 
-Each spool holds at most 1 MiB of payload before spilling (slice allocator overhead is additional).
-Zstd uses one encoder worker and a 1 MiB window. Raw and encoded bodies may both occupy temporary disk.
-Source data is read in 64 KiB chunks. Known lengths are checked before upload. Unknown finite-limit
-bodies preserve the already-read prefix and stream the remainder unchanged when crossing the cap.
+The image limit applies to the original body. The Zstd limit applies to the body selected after image edits. Zero permits any body size. For an unknown length with only finite active limits, the plugin keeps the prefix through the larger limit and streams the rest as received when that limit is crossed.
 
-A bodyLease owns the original and encoded spools until the forwarding method and all asynchronous
-upload readers have finished. Independent SectionReader cursors avoid mutating an earlier request
-when handling 415. Slots survive configuration replacement and are released on cancellation.
-The queue is bounded by host/client cancellation and the host's own concurrency admission; the plugin
-does not allocate another complete request body for waiting requests or retry failed network uploads.
+A preparation slot covers reading, image processing and Zstd encoding for requests over the larger of 64 KiB and `min_body_bytes`, and for unknown lengths. The default is four slots. Known small bodies prepare inline. Upload and response-header waiting begin after the slot is released. The host's own request admission continues to govern concurrent uploads.
 
-The process's 192 MiB Go memory target is a soft GC target, not a hard memory limit and not a body-size cap.
-The host can retain full request bodies independently; this plugin does not change that host behavior.
+Raw and encoded buffers independently spill to anonymous files after 8 MiB. Known large bodies write directly to disk. ReadAt-based cursors support the single identity retry on HTTP 415 and a two-minute Zstd cooldown. Reader leases keep file descriptors alive while the HTTP transport is reading. A compressed request with fallback disabled releases the original body and drops its replacement references during preparation.
 
-The level-3 encoder explicitly enables all-literal entropy compression, which keeps
-random-looking Base64 image data eligible for alphabet-entropy savings even when
-there are few dictionary matches. Incompressible data still uses no-gain bypass.
+Zstd uses one encoder worker per request, all-literal entropy compression and the configured level and window. The default is level 5 with an 8 MiB window. The Go encoder groups the configured levels into three modes. The pool retains up to four idle encoders. The executable sets a 1 GiB soft GC target. The host manages its own request-body memory.
 
 ## Image optimization
 
-Image processing uses the `image_max_body_bytes` filter, which defaults to 64 MiB. The scanner reads eligible request JSON in chunks and records string offsets. For unknown lengths, the spool can read up to the larger active limit or to EOF when either stage has an unlimited size. Image edits use at most 16 MiB of replacement URLs per request. The 32 MiB, 128-entry JPEG cache has a two-hour idle lifetime. One worker handles cold conversions, with at most two fresh conversions per request. Scanning and fresh work share a five-second cooperative budget. Restoring a recorded JPEG waits for the same worker and follows the request context. Cache hits hash the Base64 stream without allocating the decoded file.
+The scanner records up to 2048 image URL spans while validating the rest of the JSON. Collected edits still apply when more image parts follow. The source SHA-256 covers decoded image bytes. The cache key also includes the effective geometry, quality, savings floor and applicable PNG background. The in-memory LRU holds up to 128 MiB of encoded URLs and 1024 entries, expiring entries after six idle hours. It stores successful replacements and deterministic skips. Concurrent misses share one encode with its own timeout and pin on the source buffer. Each request waits within its own image budget and can leave independently.
 
-Original-file size minus JPEG-file size must meet the configured byte floor. Zero still requires strictly smaller output. The encoder stops when the maximum acceptable JPEG length is crossed. Byte eligibility is checked against the detected format and dimensions are checked before pixel decode.
+The source checks cap compressed file size, dimensions and total pixels. The JPEG encoder stops when its result would miss the configured savings floor, which defaults to 8 KiB. Edits share the encoded URL strings and are applied in original JSON byte order. An in-flight request can still hold a string after LRU eviction. A configuration or codec change can change the representation of an existing image.
 
-Session decisions live in up to 256 expiring slots. The slot is keyed by input history and the session header when available. A live collision falls back to original images. When provided by the host, the plugin KV stores only versioned metadata and SHA-256 digests for seven days. A restart regenerates recorded JPEGs from the original source using the stored quality and geometry and verifies each digest. Decisions from before v1.3.0 continue to use their original long-edge geometry. If recovery fails for any recorded JPEG, the image pass forwards the original body before zstd.
+## Statistics
+
+Each logical request has one record. `final_bytes` reports bytes consumed by the transport on the last attempt. `wire_bytes` covers all attempts including portions read before a 415 response. These are HTTP body counters. Recent records contain sizes, counts, timings and skip reasons. A request-size skip is recorded at request level before scanning, so the image count is unknown for those records.
 
 Build and verify against the declared 0.2.23 compatibility range with:
 
     make pack GO=/path/to/go PRIVATE_KEY=/private/outside/source/publisher.pem
-    go run -mod=vendor ./tools/checkpackage --host-version 0.2.23 --package dist/openai-upstream-zstd-1.4.0-linux-amd64.s2plugin --public-key dist/publisher-public-key.txt
+    go run -mod=vendor ./tools/checkpackage --host-version 0.2.23 --package dist/openai-upstream-zstd-1.5.0-linux-amd64.s2plugin --public-key dist/publisher-public-key.txt
 
 The check starts the signed executable with the SDK host emulator. Use a separate OAuth test account or isolated gateway to measure real cached tokens, OCR and time to first token.

@@ -11,31 +11,36 @@ import (
 
 const (
 	maxImageJSONDepth = 64
-	maxInputItems     = 4096
-	maxImageParts     = 128
+	maxImageParts     = 2048
 )
 
 var errImageJSON = errors.New("unsupported or malformed image request JSON")
 
 type jsonRange struct {
 	start, end int64
-	escaped    bool
+	// Extra JSON bytes over the ASCII URL after unescaping.
+	escapedBytes int64
 }
 
 type imagePart struct {
-	url      jsonRange
-	keepSize bool
+	url        jsonRange
+	keepSize   bool
+	toolOutput bool
 }
 
-type imageInput struct {
-	raw        jsonRange
-	kind, role string
-	images     []imagePart
+type imageParts struct {
+	parts      []imagePart
+	extra      int
+	extraBytes int64
 }
 
-type imageRequest struct {
-	items        []imageInput
-	continuation bool
+func (p *imageParts) add(part imagePart, limit int) {
+	if len(p.parts) < limit {
+		p.parts = append(p.parts, part)
+	} else {
+		p.extra++
+		p.extraBytes += part.url.end - part.url.start - 2
+	}
 }
 
 // The scanner retains offsets, not the text of arbitrary JSON values. All
@@ -45,120 +50,121 @@ type jsonImageScanner struct {
 	raw   *spool
 	input *bufio.Reader
 	pos   int64
-	parts int
 }
 
-func scanImageRequest(ctx context.Context, raw *spool) (imageRequest, error) {
+func scanImageRequest(ctx context.Context, raw *spool) (imageParts, error) {
 	s := jsonImageScanner{ctx: ctx, raw: raw, input: bufio.NewReaderSize(raw.section(0, raw.size), copyChunkBytes)}
-	var request imageRequest
+	var images imageParts
 	if _, err := s.next(); err != nil {
-		return request, err
+		return images, err
 	}
-	err := s.object(0, []string{"input", "previous_response_id", "conversation"}, func(key string) error {
-		if key != "input" {
-			var null [4]byte
-			start := s.pos
-			if err := s.skip(1); err != nil {
-				return err
-			}
-			if s.pos-start == 4 {
-				_, _ = io.ReadFull(raw.section(start, s.pos), null[:])
-			}
-			request.continuation = request.continuation || string(null[:]) != "null"
-			return nil
-		}
+	err := s.object(0, []string{"input"}, func(_ string) error {
 		if s.peek() != '[' {
 			return s.skip(1)
 		}
-		return s.array(1, maxInputItems, func() error {
-			item, err := s.item()
-			if err == nil {
-				request.items = append(request.items, item)
+		return s.array(1, func() error {
+			item, err := s.item(maxImageParts - len(images.parts))
+			if err != nil {
+				return err
 			}
-			return err
+			images.parts = append(images.parts, item.parts...)
+			images.extra += item.extra
+			images.extraBytes += item.extraBytes
+			return nil
 		})
 	})
 	if err != nil {
-		return imageRequest{}, err
+		return imageParts{}, err
 	}
 	if _, err := s.next(); err != io.EOF {
-		return imageRequest{}, errImageJSON
+		return imageParts{}, errImageJSON
 	}
-	return request, ctx.Err()
+	return images, ctx.Err()
 }
 
-func (s *jsonImageScanner) item() (imageInput, error) {
-	item := imageInput{raw: jsonRange{start: s.pos}}
-	var content, output []imagePart
-	var err error
+func (s *jsonImageScanner) item(limit int) (imageParts, error) {
 	if s.peek() != '{' {
-		err = s.skip(2)
-	} else {
-		err = s.object(2, []string{"type", "role", "content", "output"}, func(key string) error {
-			var err error
-			switch key {
-			case "type":
-				item.kind, err = s.shortValue(3)
-			case "role":
-				item.role, err = s.shortValue(3)
-			case "content":
-				content, err = s.imageParts(false)
-			case "output":
-				output, err = s.imageParts(true)
+		return imageParts{}, s.skip(2)
+	}
+	var kind, role string
+	var content, output, screenshot imageParts
+	err := s.object(2, []string{"type", "role", "content", "output"}, func(key string) error {
+		var err error
+		switch key {
+		case "type":
+			kind, err = s.shortValue(3)
+		case "role":
+			role, err = s.shortValue(3)
+		case "content":
+			content, err = s.partArray(limit, false)
+		case "output":
+			switch s.peek() {
+			case '{':
+				var part imagePart
+				part, err = s.part(3, "computer_screenshot", true)
+				if part.url.end != 0 {
+					screenshot.add(part, limit)
+				}
+			default:
+				output, err = s.partArray(limit, true)
 			}
-			return err
-		})
-	}
-	item.raw.end = s.pos
+		}
+		return err
+	})
 	switch {
-	case (item.kind == "" || item.kind == "message") && item.role == "user":
-		item.images = content
-	case item.kind == "function_call_output" || item.kind == "custom_tool_call_output":
-		item.images = output
+	case (kind == "" || kind == "message") && role == "user":
+		return content, err
+	case kind == "function_call_output" || kind == "custom_tool_call_output":
+		return output, err
+	case kind == "computer_call_output":
+		return screenshot, err
 	}
-	return item, err
+	return imageParts{}, err
 }
 
-func (s *jsonImageScanner) imageParts(toolOutput bool) ([]imagePart, error) {
+func (s *jsonImageScanner) partArray(limit int, toolOutput bool) (imageParts, error) {
+	var parts imageParts
 	if s.peek() != '[' {
-		return nil, s.skip(3)
+		return parts, s.skip(3)
 	}
-	var parts []imagePart
-	err := s.array(3, 0, func() error {
-		if s.peek() != '{' {
-			return s.skip(4)
+	err := s.array(3, func() error {
+		part, err := s.part(4, "input_image", toolOutput)
+		if part.url.end != 0 {
+			parts.add(part, limit)
 		}
-		var kind, detail string
-		var url jsonRange
-		err := s.object(4, []string{"type", "detail", "image_url"}, func(key string) error {
-			var err error
-			switch key {
-			case "type":
-				kind, err = s.shortValue(5)
-			case "detail":
-				detail, err = s.shortValue(5)
-			case "image_url":
-				if s.peek() != '"' {
-					return s.skip(5)
-				}
-				url, err = s.stringRange()
-			}
-			return err
-		})
-		if err != nil || kind != "input_image" || url.end == 0 {
-			return err
-		}
-		if !slices.Contains([]string{"", "auto", "low", "high", "original"}, detail) {
-			return nil
-		}
-		s.parts++
-		if s.parts > maxImageParts {
-			return errImageJSON
-		}
-		parts = append(parts, imagePart{url: url, keepSize: toolOutput || detail == "original"})
-		return nil
+		return err
 	})
 	return parts, err
+}
+
+func (s *jsonImageScanner) part(depth int, expectedKind string, toolOutput bool) (imagePart, error) {
+	if s.peek() != '{' {
+		return imagePart{}, s.skip(depth)
+	}
+	var kind, detail string
+	var url jsonRange
+	err := s.object(depth, []string{"type", "detail", "image_url"}, func(key string) error {
+		var err error
+		switch key {
+		case "type":
+			kind, err = s.shortValue(depth + 1)
+		case "detail":
+			detail, err = s.shortValue(depth + 1)
+		case "image_url":
+			if s.peek() != '"' {
+				return s.skip(depth + 1)
+			}
+			url, err = s.stringRange()
+		}
+		return err
+	})
+	// The outer computer_call_output also identifies the screenshot when
+	// the nested type is omitted.
+	kindMatches := kind == expectedKind || (kind == "" && expectedKind == "computer_screenshot")
+	if err != nil || !kindMatches {
+		return imagePart{}, err
+	}
+	return imagePart{url: url, keepSize: detail == "original", toolOutput: toolOutput}, nil
 }
 
 func (s *jsonImageScanner) peek() byte {
@@ -249,17 +255,14 @@ func (s *jsonImageScanner) object(depth int, keys []string, field func(string) e
 	}
 }
 
-func (s *jsonImageScanner) array(depth, limit int, item func() error) error {
+func (s *jsonImageScanner) array(depth int, item func() error) error {
 	if depth > maxImageJSONDepth || s.want('[') != nil {
 		return errImageJSON
 	}
 	if c, _ := s.next(); c == ']' {
 		return s.want(']')
 	}
-	for count := 0; ; count++ {
-		if limit > 0 && count >= limit {
-			return errImageJSON
-		}
+	for {
 		var err error
 		if item == nil {
 			err = s.skip(depth + 1)
@@ -288,7 +291,7 @@ func (s *jsonImageScanner) skip(depth int) error {
 	case '{':
 		return s.object(depth, nil, nil)
 	case '[':
-		return s.array(depth, 0, nil)
+		return s.array(depth, nil)
 	case '"':
 		_, err := s.stringRange()
 		return err
@@ -363,10 +366,11 @@ func (s *jsonImageScanner) stringRange() (jsonRange, error) {
 			span.end = s.pos
 			return span, nil
 		case '\\':
-			span.escaped = true
+			start := s.pos
 			if err := s.escape(); err != nil {
 				return jsonRange{}, err
 			}
+			span.escapedBytes += s.pos - start
 		default:
 			return jsonRange{}, errImageJSON
 		}

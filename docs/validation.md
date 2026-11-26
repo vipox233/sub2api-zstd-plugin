@@ -1,5 +1,24 @@
 # Release validation
 
+## v1.5.0
+
+Run the same `BenchmarkOutboundPreparation` fixture on `main` at `8c7fcd0` and on the refactor. Use Go 1.27.3 on Linux amd64, `GOMAXPROCS=4` and `-benchtime=3x`. The runs below used an AMD EPYC 9V74 worker. Enable image optimization in both runs and use each version's remaining defaults. The history sample primes the first turn before measuring the next one. Other samples use a fresh optimizer for each iteration.
+
+| Synthetic request | Original JSON | HTTP body bytes, before → after | JSON bytes saved, before → after | Local time, before → after |
+|---|---:|---:|---:|---:|
+| Single 4K screenshot | 17,316,446 B | 425,832 → 324,253 B | 97.54% → 98.13% | 561 → 449 ms |
+| Four screenshots in history | 30,922,715 B | 12,457,724 → 1,135,586 B | 59.71% → 96.33% | 149 → 68 ms |
+| Six 4K screenshots | 104,013,090 B | 78,026,822 → 1,646,737 B | 24.98% → 98.42% | 429 → 1,168 ms |
+| Long text with a repeated prefix | 3,670,028 B | 2,746,214 → 2,157,889 B | 25.17% → 41.20% | 27.8 → 17.4 ms |
+
+Local timing includes preparation and reading the body into a mock transport. At 5 Mbps, the six-image sample's payload alone would take about 125 → 2.6 seconds to send. Production first-token latency, OCR and upstream prompt-cache behavior depend on the actual requests and upstream.
+
+To reproduce, copy `internal/plugin/bandwidth_bench_test.go` to the baseline checkout and run the same command in each checkout.
+
+```sh
+GOMAXPROCS=4 go test ./internal/plugin -run '^$' -bench '^BenchmarkOutboundPreparation$' -benchtime=3x -count=1
+```
+
 ## v1.3.0
 
 The Go and UI regression suites cover JPEG and opaque PNG, all size presets, portrait and long-image geometry, the 32 KiB boundary and zero setting, saved configuration migration, and protected-image passthrough. They also check exact JPEG recovery after restart, legacy PNG decisions saved by v1.2.x, byte-local JSON edits and the HTTP 415 retry body.

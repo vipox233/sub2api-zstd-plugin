@@ -1,5 +1,14 @@
 # History
 
+## 1.5.0 - 2026-11-26
+
+- Retire conversation slots, prefix hashing, persistent image decisions and full-body image rollback. Use a shared bounded content-addressed cache. Remove the per-request two-image and 16 MiB edit budgets.
+- Make image worker count, timeout, tool resize and transparent PNG background configurable. Accept inline images in continuation requests and computer screenshot outputs, static 16-bit PNG with eXIf and primary JPEG images with MPF or trailing data.
+- Default to unlimited image request size, Q78, tool fit1440, an 8 KiB savings floor, automatic workers and a 30-second budget. Collect up to 2048 images and preserve saved overrides.
+- Share image encodes across request cancellation and reuse replacement strings directly. Use a 1 GiB soft GC target.
+- Release the four default preparation slots before upload. Expose Zstd level/window with defaults 5/8 MiB, apply the size limit after image edits and use a two-minute 415 cooldown.
+- Add a 30-request size and timing history, visible skip reasons and per-attempt byte accounting for 415. Cover the transport and UI changes with regression tests and reproducible bandwidth benchmarks.
+
 ## 1.4.0 - 2026-11-25
 
 - Make the image rewrite request-size limit configurable independently of zstd, with 64 MiB as the default and zero for unlimited.

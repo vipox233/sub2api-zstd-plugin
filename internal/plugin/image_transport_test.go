@@ -154,6 +154,12 @@ func imageTestDecodeJPEG(t *testing.T, body []byte, width, height int) (image.Im
 		t.Fatal("expected original message and both content parts")
 	}
 	url := doc.Input[0].Content[1].ImageURL
+	img, size := imageTestDecodeJPEGURL(t, url, width, height)
+	return img, url, size
+}
+
+func imageTestDecodeJPEGURL(t *testing.T, url string, width, height int) (image.Image, int) {
+	t.Helper()
 	if !strings.HasPrefix(url, imageTestJPEG) {
 		t.Fatal("expected transformed JPEG in first image part")
 	}
@@ -162,10 +168,13 @@ func imageTestDecodeJPEG(t *testing.T, body []byte, width, height int) (image.Im
 		t.Fatalf("invalid forwarded Base64: %v", err)
 	}
 	img, err := jpeg.Decode(bytes.NewReader(data))
-	if err != nil || img.Bounds().Dx() != width || img.Bounds().Dy() != height {
-		t.Fatalf("unexpected JPEG geometry: image=%T, decode err=%v, want=%dx%d", img, err, width, height)
+	if err != nil {
+		t.Fatalf("invalid forwarded JPEG: %v", err)
 	}
-	return img, url, len(data)
+	if got := img.Bounds().Size(); got != image.Pt(width, height) {
+		t.Fatalf("JPEG dimensions %v, want %dx%d", got, width, height)
+	}
+	return img, len(data)
 }
 
 func imageTestReadJPEG(t *testing.T, body []byte, width, height int) string {
@@ -208,63 +217,78 @@ func TestImageRewritePreservesRawJSONAndHistory(t *testing.T) {
 	}
 }
 
-func TestUnknownLengthBodyRespectsIndependentImageAndZstdLimits(t *testing.T) {
-	_, original := imageTestSource(t)
+func TestImageAndZstdBodyLimits(t *testing.T) {
+	const width, height = 640, 320
+	original := imageTestDataURL(imageTestJPEG, imageTestJPEGSource(t, width, height))
 	body := imageTestTurn(imageTestUser(original, "auto"))
 	size := int64(len(body))
+	reference := imageTestPlugin(t, map[string]any{"compression_enabled": false})
+	selected := imageTestUnpack(t, imageTestSend(t, reference, body), "")
+	imageTestReadJPEG(t, selected, width, height)
+	selectedSize := int64(len(selected))
+	if selectedSize <= 1024 || selectedSize >= size {
+		t.Fatalf("body-size fixture must shrink across a valid Zstd limit: %d → %d", size, selectedSize)
+	}
+
 	for _, tc := range []struct {
-		name                      string
-		zstdLimit, imageLimit     int64
-		wantEncoding              string
-		wantJPEG, wantPassThrough bool
+		name                  string
+		zstdLimit, imageLimit int64
+		wantEncoding          string
+		wantRewrite, tooLarge bool
 	}{
-		{"at both limits", size, size, "zstd", true, false},
-		{"only image fits", size - 1, size, "", true, false},
-		{"only zstd fits", size, size - 1, "zstd", false, false},
-		{"unlimited image", size - 1, 0, "", true, false},
+		{"selected body at zstd limit", selectedSize, size, "zstd", true, false},
+		{"selected body above zstd limit", selectedSize - 1, size, "", true, true},
+		{"original above image limit", size, size - 1, "zstd", false, false},
+		{"unlimited image", selectedSize, 0, "zstd", true, false},
 		{"unlimited zstd", 0, size - 1, "zstd", false, false},
-		{"over both limits", size / 2, size / 2, "", false, true},
+		{"original above both limits", size / 2, size / 2, "", false, true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := imageTestPlugin(t, map[string]any{"max_body_bytes": tc.zstdLimit, "image_max_body_bytes": tc.imageLimit})
-			req := imageTestRequest(t, body)
-			meta := oauthMeta(body)
-			req.ContentLength = -1
-			meta.ContentLength = -1
-			var got capture
-			p.roundTripOverride = captureTransport(t, &got)
-			resp, err := p.RoundTrip(req, meta)
-			closeResponse(t, resp, err)
-			if tc.wantPassThrough {
-				if got.length != -1 || got.headers.Get("Content-Encoding") != "" || !bytes.Equal(got.body, body) {
-					t.Fatal("oversize request did not stream its exact original body")
+		for _, length := range []string{"known_length", "unknown_length"} {
+			t.Run(tc.name+"/"+length, func(t *testing.T) {
+				p := imageTestPlugin(t, map[string]any{"max_body_bytes": tc.zstdLimit, "image_max_body_bytes": tc.imageLimit})
+				req := imageTestRequest(t, body)
+				meta := oauthMeta(body)
+				if length == "unknown_length" {
+					req.ContentLength = -1
+					meta.ContentLength = -1
 				}
-				return
-			}
-			selected := imageTestUnpack(t, got, tc.wantEncoding)
-			want := body
-			if tc.wantJPEG {
-				replacement := imageTestReadJPEG(t, selected, imageTestWidth, imageTestHeight)
-				want = imageTestTurn(imageTestUser(replacement, "auto"))
-			}
-			if !bytes.Equal(selected, want) {
-				t.Fatal("request changed outside the eligible image URL")
-			}
-		})
+				var got capture
+				p.roundTripOverride = captureTransport(t, &got)
+				resp, err := p.RoundTrip(req, meta)
+				closeResponse(t, resp, err)
+				var wantLarge int64
+				if tc.tooLarge {
+					wantLarge = 1
+				}
+				if gotLarge := p.stats.large.Load(); gotLarge != wantLarge {
+					t.Fatalf("Zstd size-limit count = %d, want %d", gotLarge, wantLarge)
+				}
+				if length == "unknown_length" && tc.tooLarge && !tc.wantRewrite {
+					if got.length != -1 || got.headers.Get("Content-Encoding") != "" || !bytes.Equal(got.body, body) {
+						t.Fatal("oversize request did not stream its exact original body")
+					}
+					return
+				}
+				want := body
+				if tc.wantRewrite {
+					want = selected
+				}
+				if forwarded := imageTestUnpack(t, got, tc.wantEncoding); !bytes.Equal(forwarded, want) {
+					t.Fatal("forwarded JSON did not match the selected image body")
+				}
+			})
+		}
 	}
 }
 
-func TestImageRewriteKeepsUnknownHistoryAndMalformattedImages(t *testing.T) {
+func TestImageRewriteKeepsMalformedImages(t *testing.T) {
 	raw, original := imageTestSource(t)
 	truncated := imageTestPNG + base64.StdEncoding.EncodeToString(raw[:len(raw)-12])
 	badBase64 := original[:len(original)-16] + strings.Repeat("!", 16)
-	const answer = `{"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"prior response"}]}`
-	const current = `{"type":"message", "role":"user", "content":[{"type":"input_text", "text":"continue"}]}`
 	for _, tc := range []struct {
 		name string
 		body []byte
 	}{
-		{"unknown history", imageTestTurn(imageTestUser(original, "auto"), answer, current)},
 		{"truncated PNG", imageTestTurn(imageTestUser(truncated, "auto"))},
 		{"invalid Base64", imageTestTurn(imageTestUser(badBase64, "auto"))},
 	} {
@@ -346,7 +370,7 @@ func TestImageRewriteJPEGPresetDimensions(t *testing.T) {
 	}{
 		{"default 1080p portrait", portrait, "", 1080, 1920},
 		{"1440p portrait", portrait, "fit1440", 1440, 2560},
-		{"3 to 1 long image", imageTestJPEGSource(t, 3600, 1200), "fit1080", 3600, 1200},
+		{"3 to 1 long image", imageTestJPEGSource(t, 3600, 1200), "fit1080", 3240, 1080},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			config := map[string]any{"compression_enabled": false}
@@ -374,7 +398,8 @@ func TestImageResizeBoxesPreserveAspectRatio(t *testing.T) {
 		{"1440p landscape", "fit1440", 3840, 2160, 2560, 1440},
 		{"square", "fit1080", 3000, 3000, 1080, 1080},
 		{"just below 3 to 1", "fit1080", 4799, 1600, 1920, 640},
-		{"3 to 1 tall portrait", "fit1080", 1600, 4800, 1600, 4800},
+		{"3 to 1 tall portrait", "fit1080", 1600, 4800, 1080, 3240},
+		{"very long with short edge under the cap", "fit1440", 600, 12000, 600, 12000},
 		{"no upscaling", "fit1440", 320, 480, 320, 480},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -432,7 +457,7 @@ func TestImageRewriteAdoptsExactly32KiBNetSavings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			original := imageTestAddJPEGSegment(source, 0xfe, make([]byte, tc.comment))
 			body := imageTestTurn(imageTestUser(imageTestDataURL(imageTestJPEG, original), "auto"))
-			p := imageTestPlugin(t, map[string]any{"compression_enabled": false})
+			p := imageTestPlugin(t, map[string]any{"compression_enabled": false, "image_min_savings_bytes": 32 << 10})
 			got := imageTestUnpack(t, imageTestSend(t, p, body), "")
 			want := body
 			if tc.adopt {
@@ -474,13 +499,6 @@ func TestImageRewriteSupportsSmallOpaquePalettePNG(t *testing.T) {
 
 func TestImageRewriteKeepsProtectedInputs(t *testing.T) {
 	rect := image.Rect(0, 0, 128, 128)
-	alpha := image.NewNRGBA(rect)
-	for y := range 128 {
-		for x := range 128 {
-			alpha.SetNRGBA(x, y, color.NRGBA{R: 217, A: 255})
-		}
-	}
-	alpha.SetNRGBA(64, 64, color.NRGBA{R: 217, A: 254})
 	still := imageTestEncodePNG(t, image.NewGray(rect))
 	// Add an APNG animation control chunk that a static PNG decoder skips.
 	actl := []byte{0, 0, 0, 8, 'a', 'c', 'T', 'L', 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0}
@@ -491,11 +509,8 @@ func TestImageRewriteKeepsProtectedInputs(t *testing.T) {
 		name, prefix string
 		data         []byte
 	}{
-		{"partly transparent PNG", imageTestPNG, imageTestEncodePNG(t, alpha)},
-		{"16-bit PNG", imageTestPNG, imageTestEncodePNG(t, image.NewGray16(rect))},
 		{"APNG", imageTestPNG, animated},
 		{"truncated JPEG", imageTestJPEG, jpegFile[:len(jpegFile)-2]},
-		{"concatenated JPEG frames", imageTestJPEG, bytes.Join([][]byte{jpegFile, jpegFile}, nil)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := imageTestTurn(imageTestUser(imageTestDataURL(tc.prefix, tc.data), "auto"))
@@ -538,9 +553,9 @@ func TestImageDecodeRejectsOversizePixelHeaders(t *testing.T) {
 				binary.BigEndian.PutUint32(data[20:], uint32(tc.height))
 				binary.BigEndian.PutUint32(data[29:], crc32.ChecksumIEEE(data[12:29]))
 			}
-			url, reason := transcodeImage(context.Background(), data, tc.format, profile, len(data)-1)
-			if url != "" || reason != "format_or_limit" {
-				t.Fatalf("expected dimension guard, got replacement=%t reason=%q", url != "", reason)
+			result := transcodeImage(context.Background(), data, tc.format, profile, len(data)-1)
+			if result.url != "" || result.reason != "format_or_limit" {
+				t.Fatalf("expected dimension guard, got replacement=%t reason=%q", result.url != "", result.reason)
 			}
 		})
 	}
@@ -572,6 +587,174 @@ func TestImageReplacementLimitUsesOnlyNetSavings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := replacementLimit(tc.original, tc.absolute); got != tc.want {
 				t.Fatalf("maximum candidate length = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestImageRewriteToolAndComputerOutputDimensions(t *testing.T) {
+	source := imageTestDataURL(imageTestJPEG, imageTestJPEGSource(t, 1800, 1600))
+	for _, tt := range []struct {
+		name, kind, detail, mode string
+		width, height            int
+		implicitType             bool
+	}{
+		{"tool default", "function_call_output", "", "", 1620, 1440, false},
+		{"custom tool follows user mode", "custom_tool_call_output", "high", "follow", 1215, 1080, false},
+		{"computer screenshot default", "computer_call_output", "", "", 1620, 1440, false},
+		{"computer screenshot implicit type", "computer_call_output", "", "", 1620, 1440, true},
+		{"computer original detail", "computer_call_output", "original", "fit1080", 1800, 1600, false},
+		{"tool original detail", "function_call_output", "original", "fit1080", 1800, 1600, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			shape := `{"type":"input_image","image_url":` + strconv.Quote(source)
+			if tt.kind == "computer_call_output" {
+				shape = `{"type":"computer_screenshot","image_url":` + strconv.Quote(source)
+			}
+			if tt.implicitType {
+				shape = `{"image_url":` + strconv.Quote(source)
+			}
+			if tt.detail != "" {
+				shape += `,"detail":` + strconv.Quote(tt.detail)
+			}
+			shape += "}"
+			if tt.kind != "computer_call_output" {
+				shape = `[` + shape + `,{"type":"input_text","text":"keep raw \/ text"}]`
+			}
+			item := `{"type":` + strconv.Quote(tt.kind) + `,"call_id":"call_tool","output":` + shape + `}`
+			body := imageTestTurn(`{"role":"user","content":"inspect this"}`, item)
+			settings := map[string]any{"compression_enabled": false}
+			if tt.mode != "" {
+				settings["image_tool_resize_mode"] = tt.mode
+			}
+			p := imageTestPlugin(t, settings)
+			got := imageTestUnpack(t, imageTestSend(t, p, body), "")
+			start := bytes.Index(got, []byte(imageTestJPEG))
+			if start < 0 {
+				t.Fatal("forwarded tool output is missing the image data URL")
+			}
+			end := bytes.IndexByte(got[start:], '"')
+			if end < 0 {
+				t.Fatal("missing JSON string delimiter")
+			}
+			replacement := string(got[start : start+end])
+			imageTestDecodeJPEGURL(t, replacement, tt.width, tt.height)
+			if replacement == source || !bytes.Equal(got, bytes.Replace(body, []byte(source), []byte(replacement), 1)) {
+				t.Fatal("tool output did not preserve the non-image bytes")
+			}
+		})
+	}
+}
+
+func TestImageRewriteCompositesTransparentPNG(t *testing.T) {
+	const width, height = 192, 128
+	img := image.NewNRGBA(image.Rect(0, 0, width, height))
+	alpha := [3]uint8{0, 128, 255}
+	for y := range height {
+		for x := range width {
+			img.SetNRGBA(x, y, color.NRGBA{R: 128, G: 128, B: 128, A: alpha[x/64]})
+		}
+	}
+	body := imageTestTurn(imageTestUser(imageTestDataURL(imageTestPNG, imageTestEncodePNG(t, img)), "auto"))
+	p := imageTestPlugin(t, map[string]any{"compression_enabled": false})
+	for _, tt := range []struct {
+		background string
+		want       [3]int
+	}{
+		{"white", [3]int{255, 191, 128}},
+		{"black", [3]int{0, 64, 128}},
+	} {
+		t.Run(tt.background, func(t *testing.T) {
+			settings := `{"compression_enabled":false,"image_enabled":true,"image_png_background":` + strconv.Quote(tt.background) + `}`
+			if err := p.ApplyConfig(t.Context(), []byte(settings)); err != nil {
+				t.Fatal(err)
+			}
+			got := imageTestUnpack(t, imageTestSend(t, p, body), "")
+			flattened, _, _ := imageTestDecodeJPEG(t, got, width, height)
+			for i, want := range tt.want {
+				r, g, b, a := flattened.At(32+64*i, 64).RGBA()
+				for _, component := range []uint32{r, g, b} {
+					if got := int(component >> 8); got < want-5 || got > want+5 || a != 0xffff {
+						t.Fatalf("band %d composite RGBA=%x,%x,%x,%x, want gray %d", i, r, g, b, a, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestImageRewriteAccepts16BitPNGWithExif(t *testing.T) {
+	const width, height = 320, 192
+	img := image.NewGray16(image.Rect(0, 0, width, height))
+	for y := range height {
+		for x := range width {
+			shade := uint16(0x2121)
+			if x >= width/2 {
+				shade = 0xd0d0
+			}
+			img.SetGray16(x, y, color.Gray16{Y: shade})
+		}
+	}
+	pngFile := imageTestEncodePNG(t, img)
+	if pngFile[24] != 16 {
+		t.Fatal("fixture did not encode PNG at 16-bit depth")
+	}
+	// eXIf stores the orientation TIFF directly. Tag 0x0112, SHORT 6,
+	// describes a clockwise rotation, as in a phone photo.
+	tiff := []byte{'I', 'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 1, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0}
+	chunk := binary.BigEndian.AppendUint32(nil, uint32(len(tiff)))
+	chunk = append(chunk, "eXIf"...)
+	chunk = append(chunk, tiff...)
+	chunk = binary.BigEndian.AppendUint32(chunk, crc32.ChecksumIEEE(chunk[4:]))
+	pngFile = bytes.Join([][]byte{pngFile[:33], chunk, pngFile[33:]}, nil)
+	body := imageTestTurn(imageTestUser(imageTestDataURL(imageTestPNG, pngFile), "auto"))
+	p := imageTestPlugin(t, map[string]any{"compression_enabled": false})
+	got := imageTestUnpack(t, imageTestSend(t, p, body), "")
+	rotated, _, _ := imageTestDecodeJPEG(t, got, height, width)
+	top, _, _, _ := rotated.At(height/2, width/4).RGBA()
+	bottom, _, _, _ := rotated.At(height/2, width*3/4).RGBA()
+	if top >= 0x6000 || bottom <= 0xa000 {
+		t.Fatalf("PNG EXIF orientation changed the displayed pixels: top=%x bottom=%x", top, bottom)
+	}
+}
+
+func TestImageRewriteAcceptsJPEGWithMPFAndTrailer(t *testing.T) {
+	jpegFile := imageTestJPEGSource(t, 640, 320)
+	for _, tt := range []struct {
+		name string
+		file []byte
+	}{
+		{"trailing metadata", bytes.Join([][]byte{jpegFile, []byte("vendor trailer")}, nil)},
+		{"MPF followed by secondary image", bytes.Join([][]byte{imageTestAddJPEGSegment(jpegFile, 0xe2, []byte("MPF\x00metadata")), imageTestJPEGSource(t, 320, 160)}, nil)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := imageTestPlugin(t, map[string]any{"compression_enabled": false})
+			source := imageTestDataURL(imageTestJPEG, tt.file)
+			body := imageTestTurn(imageTestUser(source, "auto"))
+			got := imageTestUnpack(t, imageTestSend(t, p, body), "")
+			replacement := imageTestReadJPEG(t, got, 640, 320)
+			if replacement == source || !bytes.Equal(got, imageTestTurn(imageTestUser(replacement, "auto"))) {
+				t.Fatal("JPEG metadata prevented replacement or altered unrelated JSON")
+			}
+		})
+	}
+}
+
+func TestImageRewriteAcceptsEscapedJSONDataURL(t *testing.T) {
+	source := imageTestDataURL(imageTestJPEG, imageTestJPEGSource(t, 640, 320))
+	body := imageTestTurn(imageTestUser(source, "auto"))
+	p := imageTestPlugin(t, map[string]any{"compression_enabled": false})
+	plain := imageTestUnpack(t, imageTestSend(t, p, body), "")
+	imageTestReadJPEG(t, plain, 640, 320)
+	for _, escape := range []string{`\/`, `\u002f`} {
+		t.Run(escape, func(t *testing.T) {
+			escaped := strings.ReplaceAll(source, "/", escape)
+			raw := bytes.Replace(body, []byte(strconv.Quote(source)), []byte(`"`+escaped+`"`), 1)
+			if !json.Valid(raw) || bytes.Equal(raw, body) {
+				t.Fatal("invalid escaped URL fixture")
+			}
+			if got := imageTestUnpack(t, imageTestSend(t, p, raw), ""); !bytes.Equal(got, plain) {
+				t.Fatal("escaped URL did not produce the same replacement as the plain URL")
 			}
 		})
 	}

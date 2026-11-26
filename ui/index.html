@@ -17,7 +17,7 @@
         <h1>OpenAI 上游请求压缩</h1>
         <p class="subtitle">优化内联截图和请求体，减少上传到 Codex 上游的数据量。</p>
       </div>
-      <span class="codec">v1.4.0 · JPEG / zstd</span>
+      <span class="codec">v1.5.0 · JPEG / zstd</span>
     </header>
 
     <div id="notice" class="notice" role="status" aria-live="polite">正在读取已保存配置…</div>
@@ -51,17 +51,34 @@
             <label class="field" for="min_body_bytes">
               <span>最小请求体 <span class="unit">字节</span></span>
               <input id="min_body_bytes" type="number" value="1024" min="1" max="1048576" step="1" inputmode="numeric" required>
-              <small>小于此值直接发送，默认 1 KiB。</small>
+              <small>小于此值跳过 Zstd，默认 1 KiB。</small>
             </label>
             <label class="field" for="max_body_mib">
               <span>最大压缩请求体 <span class="unit">MiB</span></span>
               <input id="max_body_mib" type="number" value="512" min="0" step="any" inputmode="decimal" required>
-              <small>填 0 表示不限。超过此值的请求跳过 zstd。</small>
+              <small>按换图后体积判断。填 0 表示不限。</small>
             </label>
             <label class="field" for="max_in_flight">
-              <span>同时压缩的请求上限</span>
-              <input id="max_in_flight" type="number" value="2" min="1" step="1" inputmode="numeric" required>
-              <small>填写正整数。达到上限时，后续请求排队。</small>
+              <span>大请求准备并发</span>
+              <input id="max_in_flight" type="number" value="4" min="1" step="1" inputmode="numeric" required>
+              <small>读体、换图和压缩共用名额。上传前释放，小请求可独立准备。</small>
+            </label>
+            <label class="field" for="zstd_level">
+              <span>Zstd 压缩等级</span>
+              <input id="zstd_level" type="number" value="5" min="1" max="9" step="1" inputmode="numeric" required>
+              <small>1–2 快速，3–5 标准，6–9 高压缩。</small>
+            </label>
+            <label class="field" for="zstd_window_mib">
+              <span>Zstd 匹配窗口 <span class="unit">MiB</span></span>
+              <select id="zstd_window_mib">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="4">4</option>
+                <option value="8" selected>8</option>
+                <option value="16">16</option>
+                <option value="32">32</option>
+              </select>
+              <small>窗口越大，越容易识别间隔较远的重复内容。</small>
             </label>
             <label class="field" for="response_header_timeout_seconds">
               <span>等待上游响应头 <span class="unit">秒</span></span>
@@ -69,10 +86,10 @@
               <small>收到响应头后，流式输出继续按需转发。</small>
             </label>
           </div>
-          <p id="memory-budget" class="hint budget">大请求分块压缩，超过 1 MiB 的数据副本使用匿名临时文件，不按上限预分配内存。</p>
+          <p id="memory-budget" class="hint budget">每个缓冲超过 8 MiB 时溢写匿名临时文件。</p>
           <label class="checkbox-row" for="fallback_on_415">
             <input id="fallback_on_415" type="checkbox" checked>
-            <span><strong>上游返回 HTTP 415 时，回退一次未压缩请求</strong><small>只处理明确的媒体类型拒绝，不对网络错误或普通 400 自动重发。</small></span>
+            <span><strong>上游返回 HTTP 415 时，回退一次未压缩请求</strong><small>回退后暂停 Zstd 2 分钟，图片优化照常生效。</small></span>
           </label>
           <div class="field proxy-field">
             <label for="proxy_mode">上游代理</label>
@@ -87,12 +104,12 @@
         <section class="panel" aria-labelledby="image-title">
           <label class="checkbox-row" for="image_enabled">
             <input id="image_enabled" type="checkbox">
-            <span><strong id="image-title">启用图片优化</strong><small>将符合条件的 JPEG 和静态不透明 PNG 重编码为 JPEG，再压缩请求体。</small></span>
+            <span><strong id="image-title">启用图片优化</strong><small>将符合条件的 JPEG 和静态 PNG 重编码为 JPEG，再压缩请求体。</small></span>
           </label>
           <div class="field-grid">
             <label class="field" for="image_max_body_mib">
               <span>最大换图请求体 <span class="unit">MiB</span></span>
-              <input id="image_max_body_mib" type="number" value="64" min="0" step="any" inputmode="decimal" required>
+              <input id="image_max_body_mib" type="number" value="0" min="0" step="any" inputmode="decimal" required>
               <small>按整个出站请求体计算。填 0 表示不限。超过此值的请求跳过换图。</small>
             </label>
             <label class="field" for="image_resize_mode">
@@ -102,20 +119,46 @@
                 <option value="fit1440">1440p · 2560 × 1440</option>
                 <option value="original">原尺寸重编码</option>
               </select>
-              <small>等比缩小。竖图对调宽高上限，长短边比达到 3:1 时保留尺寸。</small>
+              <small>等比缩小。宽高比达到 3:1 的长图只限制短边。</small>
+            </label>
+            <label class="field" for="image_tool_resize_mode">
+              <span>工具图尺寸</span>
+              <select id="image_tool_resize_mode">
+                <option value="follow">跟随普通图片</option>
+                <option value="fit1080">1080p · 1920 × 1080</option>
+                <option value="fit1440" selected>1440p · 2560 × 1440</option>
+                <option value="original">原尺寸重编码</option>
+              </select>
+              <small>适用于结构化工具结果和电脑截图。请求指定 original 时保留尺寸。</small>
             </label>
             <label class="field" for="image_jpeg_quality">
               <span>JPEG 画质</span>
-              <input id="image_jpeg_quality" type="number" value="86" min="1" max="100" step="1" required>
-              <small>1080p 和原尺寸预设 86，1440p 预设 92。</small>
+              <input id="image_jpeg_quality" type="number" value="78" min="1" max="100" step="1" required>
+              <small>默认 78，所有尺寸档共用此画质。</small>
             </label>
             <label class="field" for="image_min_savings_kib">
               <span>至少节省 <span class="unit">KiB</span></span>
-              <input id="image_min_savings_kib" type="number" value="32" min="0" max="32768" step="any" required>
+              <input id="image_min_savings_kib" type="number" value="8" min="0" max="32768" step="any" required>
               <small>按图片文件字节计算。填 0 时，候选更小就采用。</small>
             </label>
+            <label class="field" for="image_png_background">
+              <span>透明 PNG 底色</span>
+              <select id="image_png_background">
+                <option value="white">白色</option>
+                <option value="black">黑色</option>
+              </select>
+            </label>
+            <label class="field" for="image_workers">
+              <span>图片编码并发</span>
+              <input id="image_workers" type="number" value="0" min="0" max="32" step="1" inputmode="numeric" required>
+              <small>0 自动，按可用 CPU 最多开 4 个编码任务。</small>
+            </label>
+            <label class="field" for="image_timeout_seconds">
+              <span>图片处理预算 <span class="unit">秒</span></span>
+              <input id="image_timeout_seconds" type="number" value="30" min="1" max="600" step="1" inputmode="numeric" required>
+              <small>预算耗尽后，未完成的图片沿用原图。</small>
+            </label>
           </div>
-          <p class="hint">透明 PNG、动画、超限图片和电脑操作截图使用原图。</p>
         </section>
 
       </fieldset>
@@ -130,15 +173,15 @@
     </form>
 
     <section class="panel stats-panel" aria-labelledby="stats-title">
-      <div class="section-header"><h2 id="stats-title">压缩请求体估算</h2><button id="refresh" type="button" class="button secondary compact">刷新统计</button></div>
-      <p class="section-description">只统计当前进程尝试压缩的请求，重启后清零。刷新不修改配置，也不访问上游。</p>
+      <div class="section-header"><h2 id="stats-title">Zstd 上传统计</h2><button id="refresh" type="button" class="button secondary compact">刷新统计</button></div>
+      <p class="section-description">统计当前进程使用 Zstd 的请求，重启后清零。</p>
       <div class="stats-grid">
         <div class="stat"><span>压缩次数</span><strong id="stat-compressed">—</strong></div>
-        <div class="stat"><span>对应原始体积</span><strong id="stat-before">—</strong></div>
-        <div class="stat"><span>预计发送体积</span><strong id="stat-after">—</strong></div>
+        <div class="stat"><span>压缩前体积</span><strong id="stat-before">—</strong></div>
+        <div class="stat"><span>上传体积</span><strong id="stat-after">—</strong></div>
         <div class="stat"><span>体积减少比例</span><strong id="stat-saved">—</strong></div>
       </div>
-      <p class="hint">预计发送体积 = 准备发送的压缩请求体 + HTTP 415 回退重试的原文。它不是系统实测流量，不含 HTTP/TLS/IP 开销；失败尝试可能未完整发送。回退后减少比例可能为负数。</p>
+      <p class="hint">上传体积按 HTTP 传输读取的请求体字节计量，包含 415 回退时读取的字节。系统网卡流量还包括协议开销。</p>
       <p id="stats-time" class="muted">尚未读取</p>
       <p id="test-message" class="hint">本地自检验证压缩和解压是否一致；不会发起 OpenAI 请求，也不代表已通过上游实测。</p>
       <details id="status-details" hidden><summary>查看详细统计</summary><pre id="status-json"></pre></details>
@@ -150,12 +193,32 @@
         <div class="stat"><span>原始请求体</span><strong id="stat-image-before">—</strong></div>
         <div class="stat"><span>换图后</span><strong id="stat-image-after">—</strong></div>
         <div class="stat"><span>换图节省比例</span><strong id="stat-image-saved">—</strong></div>
-        <div class="stat"><span>预计发送体积</span><strong id="stat-image-wire">—</strong></div>
+        <div class="stat"><span>上传体积</span><strong id="stat-image-wire">—</strong></div>
         <div class="stat"><span>图片缓存命中率</span><strong id="stat-image-hit">—</strong></div>
+        <div class="stat"><span>已识别图片</span><strong id="stat-image-count">—</strong></div>
         <div class="stat"><span>替换次数</span><strong id="stat-image-replaced">—</strong></div>
         <div class="stat"><span>平均换图耗时</span><strong id="stat-image-time">—</strong></div>
       </div>
-      <p class="hint">节省比例按已替换图片的文件体积计算。请求体积和平均耗时只统计发生换图的请求。</p>
+      <p class="hint">请求体积含跳过换图的请求。节省比例按已替换图片的文件体积计算，平均耗时按有替换的请求计算。</p>
+      <div class="skip-summary">
+        <h3>跳过原因</h3>
+        <p id="image-skips" class="hint">—</p>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="recent-title">
+      <h2 id="recent-title">最近请求</h2>
+      <p class="section-description">最近 30 条已完成请求。耗时依次为换图、冷编码累计和 Zstd。</p>
+      <p id="recent-empty" class="hint">暂无记录</p>
+      <div id="recent-table" class="table-scroll" tabindex="0" role="region" aria-label="最近请求明细" hidden>
+        <table class="recent-table">
+          <thead><tr>
+            <th scope="col">完成时间</th><th scope="col">原始</th><th scope="col">换图后</th>
+            <th scope="col">最终上传</th><th scope="col">图片</th><th scope="col">耗时</th>
+          </tr></thead>
+          <tbody id="recent-rows"></tbody>
+        </table>
+      </div>
     </section>
 
     <footer>

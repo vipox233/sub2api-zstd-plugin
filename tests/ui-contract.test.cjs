@@ -16,13 +16,17 @@ const appSource = fs.readFileSync(path.join(ui, 'assets/app.js'), 'utf8');
 const MiB = 1024 * 1024;
 const defaults = {
   compression_enabled: true, min_body_bytes: 1024, max_body_bytes: 512 * MiB,
-  max_in_flight: 2, fallback_on_415: true, response_header_timeout_seconds: 600,
+  max_in_flight: 4, zstd_level: 5, zstd_window_mib: 8, fallback_on_415: true, response_header_timeout_seconds: 600,
   proxy_mode: 'account',
   image_enabled: false,
-  image_max_body_bytes: 64 * MiB,
+  image_max_body_bytes: 0,
   image_resize_mode: 'fit1080',
-  image_jpeg_quality: 86,
-  image_min_savings_bytes: 32768
+  image_tool_resize_mode: 'fit1440',
+  image_jpeg_quality: 78,
+  image_min_savings_bytes: 8192,
+  image_workers: 0,
+  image_timeout_seconds: 30,
+  image_png_background: 'white'
 };
 const snapshot = {
   version: '1.1.0', algorithm: 'zstd', level: 3, config: defaults,
@@ -42,9 +46,11 @@ function harness(options = {}) {
     let value = attrs.value || '';
     return {
       id, attrs, checked: 'checked' in attrs, disabled: 'disabled' in attrs,
-      hidden: 'hidden' in attrs, textContent: '', className: '', scrollHeight: 900,
+      hidden: 'hidden' in attrs, textContent: '', children: [], className: '', scrollHeight: 900,
       get value() { return value; }, set value(next) { value = String(next); },
       set innerHTML(_) { throw new Error('UI must not interpolate host data as HTML'); },
+      appendChild(child) { this.children.push(child); },
+      replaceChildren(...children) { this.children = children; },
       addEventListener(type, callback) { if (!events.has(type)) events.set(type, []); events.get(type).push(callback); },
       setAttribute(key, next) { attrs[key] = String(next); },
       focus() { this.focused = true; },
@@ -108,6 +114,7 @@ function harness(options = {}) {
   const document = {
     getElementById(id) { assert.ok(elements.has(id), `HTML must declare ${id}`); return elements.get(id); },
     querySelector(selector) { assert.equal(selector, '.shell'); return shell; },
+    createElement(tag) { return makeElement(tag); },
     documentElement: shell
   };
   window.document = document;
@@ -161,14 +168,15 @@ test('app loads saved configuration and read-only status automatically; negative
   const h = harness({ autoReply: true }); h.runApp(); await settle();
   assert.deepEqual(h.callTypes(), ['config.load', 'plugin.status']);
   assert.equal(h.elements.get('max_body_mib').value, '512');
-  assert.equal(h.elements.get('image_max_body_mib').value, '64');
+  assert.equal(h.elements.get('image_max_body_mib').value, '0');
+  assert.equal(h.elements.get('max_in_flight').value, '4');
+  assert.equal(h.elements.get('image_min_savings_kib').value, '8');
   assert.equal(h.elements.get('save').disabled, false);
   assert.equal(h.elements.get('stat-compressed').textContent, '2');
   assert.equal(h.elements.get('stat-saved').textContent, '-25.0%');
   assert.equal(h.elements.get('status-details').hidden, false);
-  assert.match(html, /压缩请求体估算/);
-  assert.match(html, /不是系统实测流量/);
-  assert.match(html, /失败尝试可能未完整发送/);
+  assert.match(html, /Zstd 上传统计/);
+  assert.match(html, /HTTP 传输读取的请求体字节/);
   h.disposeApp();
   assert.equal(h.intervals.size, 0);
 });
@@ -189,6 +197,37 @@ test('image cards show per-request average and image savings, then clear when no
   h.elements.get('refresh').fire('click'); await settle();
   assert.equal(h.elements.get('stat-image-time').textContent, '—');
   assert.equal(h.elements.get('stat-image-saved').textContent, '—');
+  h.disposeApp();
+});
+
+test('app shows recent request body sizes, image outcomes, timings and skip reasons', async () => {
+  const request = {
+    at: '2026-11-26T09:30:00Z', original_bytes: 4 * MiB, after_image_bytes: 2 * MiB,
+    final_bytes: 2 * MiB, wire_bytes: 3 * MiB, attempts: 2, image_counts_known: true,
+    images: 3, replaced: 2, cache_hits: 1, skipped: 1, skips: { no_gain: 1 },
+    image_milliseconds: 12.5, image_encode_milliseconds: 9, zstd_milliseconds: 3
+  };
+  let status = { ...snapshot, images: { images: 3, skips: { no_gain: 1, request_limit: 2 } },
+    recent_requests: [request] };
+  const h = harness({ autoReply: true, handlers: { 'plugin.status': () => ({ result: { status_json: status } }) } });
+  h.runApp(); await settle();
+  assert.equal(h.elements.get('stat-image-count').textContent, '3');
+  assert.equal(h.elements.get('image-skips').textContent, '请求体超限 2 · 节省不足 1');
+  assert.equal(h.elements.get('recent-table').hidden, false);
+  const [row] = h.elements.get('recent-rows').children;
+  assert.equal(row.children[1].textContent, '4.00 MiB');
+  assert.equal(row.children[2].textContent, '2.00 MiB');
+  assert.equal(row.children[3].textContent, '2.00 MiB');
+  assert.equal(row.children[3].children[0].textContent, '两次合计 3.00 MiB');
+  assert.equal(row.children[4].textContent, '换 2 · 命中 1 · 跳 1 / 3');
+  assert.equal(row.children[4].title, '节省不足 1');
+  assert.equal(row.children[5].textContent, '12.5 ms / 9.0 ms / 3.0 ms');
+
+  status = { ...snapshot };
+  h.elements.get('refresh').fire('click'); await settle();
+  assert.equal(h.elements.get('recent-rows').children.length, 0);
+  assert.equal(h.elements.get('recent-table').hidden, true);
+  assert.equal(h.elements.get('image-skips').textContent, '—');
   h.disposeApp();
 });
 
@@ -258,11 +297,11 @@ test('old image settings migrate while the saved zstd cap stays at 16 MiB', asyn
   delete oldConfig.image_max_body_bytes;
   const h = harness({autoReply:true, config:oldConfig}); h.runApp(); await settle();
   assert.equal(h.elements.get('max_body_mib').value, '16');
-  assert.equal(h.elements.get('image_max_body_mib').value, '64');
+  assert.equal(h.elements.get('image_max_body_mib').value, '0');
   assert.equal(h.elements.get('image_enabled').checked, true);
   assert.equal(h.elements.get('image_resize_mode').value, 'fit1080');
-  assert.equal(h.elements.get('image_jpeg_quality').value, '86');
-  assert.equal(h.elements.get('image_min_savings_kib').value, '32');
+  assert.equal(h.elements.get('image_jpeg_quality').value, '78');
+  assert.equal(h.elements.get('image_min_savings_kib').value, '8');
   assert.equal(h.callTypes().includes('config.save'), false);
   h.elements.get('config-form').fire('submit'); await settle();
   const saved = h.messages.find(m => m.type === 'config.save').config;
@@ -270,21 +309,47 @@ test('old image settings migrate while the saved zstd cap stays at 16 MiB', asyn
   h.disposeApp();
 });
 
-test('changing size presets switches default quality and preserves a custom quality', async () => {
+test('v1.4 saved image caps and quality survive loading and saving with new fields', async () => {
+  const { image_tool_resize_mode, image_workers, image_timeout_seconds, image_png_background,
+    zstd_level, zstd_window_mib, ...v14 } = defaults;
+  const oldConfig = {
+    ...v14, max_in_flight: 2, image_enabled: true, image_max_body_bytes: 64 * MiB,
+    image_jpeg_quality: 86, image_min_savings_bytes: 32 * 1024
+  };
+  const h = harness({ autoReply: true, config: oldConfig }); h.runApp(); await settle();
+  assert.equal(h.elements.get('image_max_body_mib').value, '64');
+  assert.equal(h.elements.get('image_jpeg_quality').value, '86');
+  assert.equal(h.elements.get('max_in_flight').value, '2');
+  assert.equal(h.elements.get('image_min_savings_kib').value, '32');
+  assert.equal(h.elements.get('image_workers').value, '0');
+  h.elements.get('config-form').fire('submit'); await settle();
+  assert.deepEqual(h.messages.find(m => m.type === 'config.save').config, { ...defaults, ...oldConfig });
+  h.disposeApp();
+});
+
+test('changing size presets and other controls preserves JPEG quality', async () => {
   const h = harness({autoReply:true}); h.runApp(); await settle();
   const mode = h.elements.get('image_resize_mode');
   const quality = h.elements.get('image_jpeg_quality');
   mode.value = 'fit1440'; mode.fire('change');
-  assert.equal(quality.value, '92');
+  assert.equal(quality.value, '78');
   mode.value = 'original'; mode.fire('change');
-  assert.equal(quality.value, '86');
+  assert.equal(quality.value, '78');
   quality.value = '79';
   mode.value = 'fit1440'; mode.fire('change');
   assert.equal(quality.value, '79');
   h.elements.get('image_min_savings_kib').value = '0';
+  h.elements.get('image_tool_resize_mode').value = 'follow';
+  h.elements.get('image_png_background').value = 'black';
+  h.elements.get('image_workers').value = '3';
+  h.elements.get('image_timeout_seconds').value = '45';
+  h.elements.get('zstd_level').value = '8';
+  h.elements.get('zstd_window_mib').value = '16';
   h.elements.get('config-form').fire('submit'); await settle();
   const saved = h.messages.find(m => m.type === 'config.save').config;
-  assert.deepEqual(saved, {...defaults, image_resize_mode:'fit1440', image_jpeg_quality:79, image_min_savings_bytes:0});
+  assert.deepEqual(saved, {...defaults, image_resize_mode:'fit1440', image_tool_resize_mode:'follow',
+    image_jpeg_quality:79, image_min_savings_bytes:0, image_png_background:'black',
+    image_workers:3, image_timeout_seconds:45, zstd_level:8, zstd_window_mib:16});
   h.disposeApp();
 });
 
